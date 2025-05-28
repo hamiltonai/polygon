@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Polygon Data Pull",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/python/polygon_data_pull.py",
+            "console": "integratedTerminal",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+} 

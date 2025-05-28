@@ -9,6 +9,13 @@ from datetime import datetime
 import json
 import pytz
 
+# Add dotenv support for local development
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # If dotenv is not installed, skip (for AWS Lambda)
+
 def get_polygon_quote(symbol, api_key):
     url = f"https://api.polygon.io/v2/last/nbbo/stocks/{symbol}"
     params = {"apiKey": api_key}
@@ -32,6 +39,21 @@ def get_polygon_market_cap_thousands(symbol, api_key):
             return None
     else:
         return None
+
+def get_latest_screener_key_from_s3(s3, bucket_name, prefix):
+    # List all objects in the screener folder
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+    screener_files = [obj['Key'] for obj in response.get('Contents', []) if obj['Key'].endswith('.csv')]
+    if not screener_files:
+        raise FileNotFoundError('No nasdaq_screener_*.csv file found in S3 stock_screener directory')
+    # Return the latest by name (or by LastModified if needed)
+    return max(screener_files)
+
+def get_tickers_from_s3_screener(s3, bucket_name, screener_key):
+    csv_obj = s3.get_object(Bucket=bucket_name, Key=screener_key)
+    file_content = csv_obj['Body'].read().decode('utf-8')
+    reader = csv.DictReader(StringIO(file_content))
+    return [row['Symbol'] for row in reader if row.get('Symbol')]
 
 def lambda_handler(event, context):
     s3 = boto3.client('s3')
@@ -60,14 +82,17 @@ def lambda_handler(event, context):
     prev_close_col = 'previous_close'  # For appending if not present
 
     try:
-        csv_obj = s3.get_object(Bucket=bucket_name, Key=input_file_key)
-        file_content = csv_obj['Body'].read().decode('utf-8')
-        csv_file = StringIO(file_content)
-        csv_reader = csv.DictReader(csv_file)
-        rows = list(csv_reader)
+        # Get latest screener file from S3
+        screener_prefix = 'stock_screener/nasdaq_screener_'
+        screener_key = get_latest_screener_key_from_s3(s3, bucket_name, screener_prefix)
+        tickers = get_tickers_from_s3_screener(s3, bucket_name, screener_key)
+        rows = []
+        for symbol in tickers:
+            row = {'ticker': symbol}
+            rows.append(row)
 
         # Determine fieldnames: preserve all original, add new columns if not present
-        fieldnames = list(csv_reader.fieldnames) if csv_reader.fieldnames else []
+        fieldnames = list(rows[0].keys()) if rows else []
         # Insert previous_close after source if not present
         if prev_close_col not in fieldnames:
             if 'source' in fieldnames:
