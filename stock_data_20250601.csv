@@ -1,0 +1,6 @@
+ticker,name,market_cap_millions,volume,previous_close,open,high,low,current_price_00:31,open_pct_chg_00:31,previous_pct_chg_00:31,current_price_00:32,open_pct_chg_00:32,previous_pct_chg_00:32
+MSFT,Microsoft Corp,3424098.63,34770475,460.36,459.71,461.68,455.54,460.36,+0.14%,N/A,460.36,+0.14%,+0.00%
+AAPL,Apple Inc.,2990301.72,70819942,200.85,199.37,201.96,196.78,200.85,+0.74%,N/A,200.85,+0.74%,+0.00%
+AMZN,Amazon.Com Inc,2187180.92,51679406,205.01,204.84,205.99,201.69,205.01,+0.08%,N/A,205.01,+0.08%,+0.00%
+GOOGL,Alphabet Inc. Class A Common Stock,2098098.49,52639911,171.74,171.35,172.21,167.44,171.74,+0.23%,N/A,171.74,+0.23%,+0.00%
+TSLA,"Tesla, Inc. Common Stock",1168852.80,123474938,346.46,355.52,363.68,345.29,346.46,-2.55%,N/A,346.46,-2.55%,+0.00%

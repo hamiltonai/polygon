@@ -1,0 +1,98 @@
+import os
+import boto3
+from datetime import datetime
+from polygon import RESTClient
+from polygon.rest.models import TickerSnapshot
+import json
+
+# docs
+# https://polygon.io/docs/stocks/get_v2_snapshot_locale_us_markets_stocks__direction
+# https://polygon-api-client.readthedocs.io/en/latest/Snapshot.html#get-gainers-losers-snapshot
+
+def get_top_movers(client, direction):
+    """
+    Get top gainers or losers and return formatted data
+    """
+    movers = client.get_snapshot_direction("stocks", direction)
+    formatted_movers = []
+    for mover in movers:
+        if isinstance(mover, TickerSnapshot) and isinstance(mover.todays_change_percent, float):
+            formatted_movers.append({
+                'ticker': mover.ticker,
+                'change_percent': round(mover.todays_change_percent, 2),
+                'direction': direction
+            })
+    return formatted_movers
+
+def lambda_handler(event, context):
+    s3 = boto3.client('s3')
+    sns = boto3.client('sns')
+    bucket_name = os.getenv('BUCKET_NAME')
+    try:
+        # Initialize Polygon client with API key from environment
+        # client = RESTClient()  # Uses POLYGON_API_KEY environment variable
+        client = RESTClient(os.getenv('POLYGON_API_KEY'))
+        # Get current date for file naming
+        current_date = datetime.now().strftime('%Y%m%d')
+        # Get gainers and losers
+        gainers = get_top_movers(client, "gainers")
+        losers = get_top_movers(client, "losers")
+        # Combine all movers
+        all_movers = gainers + losers
+        # Create JSON output
+        output_data = {
+            'date': current_date,
+            'gainers': gainers,
+            'losers': losers,
+            'total_movers': len(all_movers)
+        }
+        # Convert to JSON string
+        json_output = json.dumps(output_data, indent=2)
+        # Upload to S3
+        file_key = f'stock_data/{current_date}/top_movers_{current_date}.json'
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=file_key,
+            Body=json_output,
+            ContentType='application/json'
+        )
+        # Generate presigned URL
+        presigned_url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': file_key},
+            ExpiresIn=604800  # 7 days
+        )
+        # Send success notification
+        message = (
+            f'Top Movers data updated using Polygon.io.\n\n'
+            f'Gainers processed: {len(gainers)}\n'
+            f'Losers processed: {len(losers)}\n'
+            f'Total movers: {len(all_movers)}\n\n'
+            f'Download link (expires in 7 days):\n{presigned_url}'
+        )
+        sns.publish(
+            TopicArn=os.getenv('SNS_TOPIC_ARN'),
+            Subject=f'Top Movers Update Complete - Polygon.io',
+            Message=message
+        )
+        return {
+            'statusCode': 200,
+            'body': {
+                'message': 'Successfully updated top movers data',
+                'gainers_count': len(gainers),
+                'losers_count': len(losers),
+                'total_movers': len(all_movers)
+            }
+        }
+    except Exception as e:
+        print(f"Exception occurred: {e}")
+        error_message = f'Error updating top movers data: {str(e)}'
+        sns.publish(
+            TopicArn=os.getenv('SNS_TOPIC_ARN'),
+            Subject=f'Top Movers Update Error - Polygon.io',
+            Message=error_message
+        )
+        return {
+            'statusCode': 500,
+            'body': error_message
+        }
