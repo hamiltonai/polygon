@@ -9,20 +9,19 @@ the qualifiers below to screen the stocks and alert the user using SNS on the fi
 
 ## Qualifying data
 
-Get data for all stocks at 8:37 AM cdt:
 - volume > 300K
 - >= 2.5% from previous close
 - previous close >= $0.01
 - open > previous close
 
-This normally brings the list down to like 50 or so, and allows me to run different scenarios to see what else could work as qualifiers.
-
 As far as data I keep an eye on:
 - market cap
 - avg volume 
 - Latest quote info at given time intervals in cdt
+  - previous day close
   - open
-  - 8:37
+  - 8:32
+  - 8:32
   - 8:40
   - 8:50
   - 8:55
