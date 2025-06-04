@@ -3,3 +3,4 @@ python/requirements.txt
 .ipynb_checkpoints/
 .vscode/
 exported_stock_data/
+python_packages/

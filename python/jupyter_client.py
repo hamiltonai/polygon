@@ -12,10 +12,7 @@ import logging
 from typing import Dict, List, Set
 import time
 
-# Polygon WebSocket imports
-from polygon import WebSocketClient
-from polygon.websocket.models import WebSocketMessage, EquityTrade, EquityQuote, EquityAgg
-from polygon import RESTClient
+import websockets
 
 # Load environment variables
 try:
@@ -26,10 +23,10 @@ except ImportError:
     print("⚠️  python-dotenv not installed - using system environment variables")
 
 # Configuration
-AWS_S3_ENABLED = False  # Toggle S3 upload
+AWS_S3_ENABLED = True  # Toggle S3 upload
 S3_BUCKET = os.getenv('BUCKET_NAME')
-S3_PREFIX = "real-time-monitor/"
-POLL_INTERVAL = 60  # seconds
+S3_PREFIX = "stock_data/real-time-monitor/"
+POLL_INTERVAL = 30  # seconds
 FILTER_START_DELAY = 420  # 7 minutes (420 seconds)
 POLYGON_API_KEY = os.getenv('POLYGON_API_KEY')
 
@@ -39,8 +36,8 @@ logger = logging.getLogger(__name__)
 
 class NASDAQMonitor:
     def __init__(self):
+        from polygon import RESTClient
         self.rest_client = RESTClient(POLYGON_API_KEY)
-        self.ws_client = WebSocketClient(POLYGON_API_KEY, feed='sip')  # Premium real-time feed
         self.stocks_data = defaultdict(dict)  # Store latest data for each stock
         self.nasdaq_symbols = set()
         self.qualified_symbols = set()
@@ -125,8 +122,10 @@ class NASDAQMonitor:
                     logger.warning(f"Reached safety limit of 10000 symbols")
                     break
             
+            # LIMIT TO FIRST 100 SYMBOLS FOR TESTING
+            symbols = symbols[:100]
             self.nasdaq_symbols = set(symbols)
-            logger.info(f"Found {len(self.nasdaq_symbols)} NASDAQ symbols")
+            logger.info(f"Using first {len(self.nasdaq_symbols)} NASDAQ symbols for testing: {list(self.nasdaq_symbols)[:5]} ...")
             
             # Fetch initial data using efficient snapshot API
             await self.fetch_initial_data()
@@ -212,35 +211,43 @@ class NASDAQMonitor:
         
         return meets_criteria
     
-    async def handle_message(self, message: WebSocketMessage):
-        """Handle incoming WebSocket messages"""
-        if isinstance(message, (EquityTrade, EquityQuote, EquityAgg)):
-            symbol = message.symbol
-            
-            async with self.data_lock:
-                if symbol not in self.stocks_data:
-                    self.stocks_data[symbol] = {}
-                
-                # Update price and volume data
-                if isinstance(message, EquityTrade):
-                    self.stocks_data[symbol]['current_price'] = message.price
-                    self.stocks_data[symbol]['volume'] = self.stocks_data[symbol].get('volume', 0) + message.size
-                    
-                    # Update high/low
-                    current_high = self.stocks_data[symbol].get('day_high', 0)
-                    current_low = self.stocks_data[symbol].get('day_low', float('inf'))
-                    self.stocks_data[symbol]['day_high'] = max(current_high, message.price)
-                    self.stocks_data[symbol]['day_low'] = min(current_low, message.price)
-                
-                elif isinstance(message, EquityQuote):
-                    self.stocks_data[symbol]['bid'] = message.bid_price
-                    self.stocks_data[symbol]['ask'] = message.ask_price
-                
-                elif isinstance(message, EquityAgg):
-                    self.stocks_data[symbol]['current_price'] = message.close
-                    self.stocks_data[symbol]['volume'] = message.volume
-                    self.stocks_data[symbol]['day_high'] = message.high
-                    self.stocks_data[symbol]['day_low'] = message.low
+    async def handle_message(self, msg):
+        """Handle incoming WebSocket messages (raw JSON)"""
+        try:
+            data = json.loads(msg)
+            if isinstance(data, list):
+                for event in data:
+                    await self._process_event(event)
+            elif isinstance(data, dict):
+                await self._process_event(data)
+        except Exception as e:
+            logger.error(f"Error handling message: {e}")
+    
+    async def _process_event(self, event):
+        symbol = event.get('sym')
+        ev_type = event.get('ev')
+        if not symbol or not ev_type:
+            return
+        async with self.data_lock:
+            if symbol not in self.stocks_data:
+                self.stocks_data[symbol] = {}
+            if ev_type == 'T':  # Trade event
+                self.stocks_data[symbol]['current_price'] = event.get('p', 0)
+                self.stocks_data[symbol]['volume'] = self.stocks_data[symbol].get('volume', 0) + event.get('s', 0)
+                # Update high/low
+                current_high = self.stocks_data[symbol].get('day_high', 0)
+                current_low = self.stocks_data[symbol].get('day_low', float('inf'))
+                price = event.get('p', 0)
+                self.stocks_data[symbol]['day_high'] = max(current_high, price)
+                self.stocks_data[symbol]['day_low'] = min(current_low, price)
+            elif ev_type == 'Q':  # Quote event
+                self.stocks_data[symbol]['bid'] = event.get('b', 0)
+                self.stocks_data[symbol]['ask'] = event.get('a', 0)
+            elif ev_type == 'AM':  # Minute aggregate
+                self.stocks_data[symbol]['current_price'] = event.get('c', 0)
+                self.stocks_data[symbol]['volume'] = event.get('v', 0)
+                self.stocks_data[symbol]['day_high'] = event.get('h', 0)
+                self.stocks_data[symbol]['day_low'] = event.get('l', 0)
     
     async def write_data_snapshot(self):
         """Write current data snapshot to CSV"""
@@ -361,73 +368,35 @@ class NASDAQMonitor:
             await self.write_data_snapshot()
     
     async def run(self):
-        """Main run loop"""
         self.start_time = time.time()
-        
-        # Fetch NASDAQ symbols
         await self.fetch_nasdaq_symbols()
-        
-        # Subscribe to all symbols
-        logger.info(f"Subscribing to {len(self.nasdaq_symbols)} symbols...")
-        
-        # Subscribe in batches to avoid overwhelming the connection
-        symbols_list = list(self.nasdaq_symbols)
-        batch_size = 100
-        
-        # Create subscription strings for efficiency
-        subscription_strings = []
-        for i in range(0, len(symbols_list), batch_size):
-            batch = symbols_list[i:i + batch_size]
-            # Create comma-separated symbol list for each batch
-            batch_str = ",".join(batch)
-            subscription_strings.append(batch_str)
-        
-        # Subscribe to all data types for each batch
-        for i, batch_str in enumerate(subscription_strings):
-            logger.info(f"Subscribing to batch {i+1}/{len(subscription_strings)}")
-            
-            # Subscribe to trades
-            self.ws_client.subscribe(f"T.{batch_str}")
-            # Subscribe to quotes  
-            self.ws_client.subscribe(f"Q.{batch_str}")
-            # Subscribe to minute aggregates
-            self.ws_client.subscribe(f"AM.{batch_str}")
-            
-            await asyncio.sleep(0.1)  # Small delay between batches
-        
-        logger.info("Subscriptions complete. Starting real-time monitoring...")
-        
         # Start periodic writer
         writer_task = asyncio.create_task(self.periodic_writer())
         
-        # Handle messages
-        async for message in self.ws_client:
-            if not self.running:
-                break
-            await self.handle_message(message)
-        
-        # Cleanup
-        writer_task.cancel()
-        self.ws_client.close()
-        logger.info("Monitor stopped")
+        uri = "wss://socket.polygon.io/stocks"
+        try:
+            async with websockets.connect(uri) as ws:
+                logger.info("Connected to Polygon WebSocket!")
+                # Authenticate
+                await ws.send(json.dumps({"action": "auth", "params": POLYGON_API_KEY}))
+                logger.info(f"Auth response: {await ws.recv()}")
+                # Subscribe to trades for all symbols
+                subscribe_str = ",".join(f"T.{s}" for s in self.nasdaq_symbols)
+                await ws.send(json.dumps({"action": "subscribe", "params": subscribe_str}))
+                logger.info(f"Subscribed to trades for {len(self.nasdaq_symbols)} symbols.")
+                # Listen for messages
+                while self.running:
+                    msg = await ws.recv()
+                    await self.handle_message(msg)
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+        finally:
+            writer_task.cancel()
+            logger.info("Monitor stopped")
 
-async def main():
-    """Main function to run the monitor"""
+def main():
     monitor = NASDAQMonitor()
-    
-    try:
-        await monitor.run()
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, shutting down...")
-        monitor.running = False
-    except Exception as e:
-        logger.error(f"Error in main loop: {e}")
-        monitor.running = False
+    asyncio.run(monitor.run())
 
-# Run the monitor
 if __name__ == "__main__":
-    # For Jupyter notebook, use:
-    # await main()
-    
-    # For script execution, use:
-    asyncio.run(main())
+    main()
