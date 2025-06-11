@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""
+NVDA Polygon API Test Script
+Tests fetching open, previous close, market cap, and current price for NVIDIA (NVDA)
+"""
+
+import os
+import asyncio
+import aiohttp
+import json
+from datetime import datetime, timedelta
+import pytz
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Configuration
+POLYGON_API_KEY = os.getenv('POLYGON_API_KEY')
+SYMBOL = 'NVDA'
+REQUEST_TIMEOUT = 10
+
+def print_header(title):
+    """Print a formatted header"""
+    print(f"\n{'='*60}")
+    print(f" {title}")
+    print(f"{'='*60}")
+
+def print_data(label, data, indent=0):
+    """Print data with formatting"""
+    spaces = "  " * indent
+    if isinstance(data, dict):
+        print(f"{spaces}{label}:")
+        for key, value in data.items():
+            if isinstance(value, (dict, list)):
+                print_data(f"{key}", value, indent + 1)
+            else:
+                print(f"{spaces}  {key}: {value}")
+    elif isinstance(data, list):
+        print(f"{spaces}{label}: [{len(data)} items]")
+        for i, item in enumerate(data[:3]):  # Show first 3 items
+            print_data(f"[{i}]", item, indent + 1)
+        if len(data) > 3:
+            print(f"{spaces}  ... and {len(data) - 3} more items")
+    else:
+        print(f"{spaces}{label}: {data}")
+
+async def fetch_polygon_data(session, url, description):
+    """Fetch data from Polygon API with error handling"""
+    headers = {"Authorization": f"Bearer {POLYGON_API_KEY}"}
+    
+    try:
+        print(f"\n🔍 Fetching {description}...")
+        print(f"URL: {url}")
+        
+        async with session.get(url, headers=headers, timeout=REQUEST_TIMEOUT) as response:
+            print(f"Status: {response.status}")
+            
+            if response.status == 200:
+                data = await response.json()
+                print(f"✅ Success - {description}")
+                return data
+            else:
+                error_text = await response.text()
+                print(f"❌ Error {response.status} - {description}")
+                print(f"Error details: {error_text}")
+                return None
+                
+    except asyncio.TimeoutError:
+        print(f"⏰ Timeout - {description}")
+        return None
+    except Exception as e:
+        print(f"💥 Exception - {description}: {str(e)}")
+        return None
+
+async def get_nvda_complete_data():
+    """Fetch all NVDA data from multiple Polygon endpoints"""
+    
+    if not POLYGON_API_KEY:
+        print("❌ POLYGON_API_KEY not found in environment variables")
+        print("Please set POLYGON_API_KEY in your .env file")
+        return
+    
+    print_header(f"POLYGON API TEST - {SYMBOL}")
+    print(f"Timestamp: {datetime.now()}")
+    print(f"API Key: {POLYGON_API_KEY[:8]}...")
+    
+    # API endpoints
+    endpoints = {
+        "Previous Day Aggregates": f"https://api.polygon.io/v2/aggs/ticker/{SYMBOL}/prev",
+        "Last Trade (Current Price)": f"https://api.polygon.io/v2/last/trade/{SYMBOL}",
+        "Company Details": f"https://api.polygon.io/v3/reference/tickers/{SYMBOL}",
+        "Daily Open/Close": f"https://api.polygon.io/v1/open-close/{SYMBOL}/{(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')}",
+        "Snapshot": f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{SYMBOL}"
+    }
+    
+    # Fetch all data concurrently
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for description, url in endpoints.items():
+            task = fetch_polygon_data(session, url, description)
+            tasks.append((description, task))
+        
+        results = {}
+        for description, task in tasks:
+            results[description] = await task
+    
+    # Process and extract the specific data we need
+    print_header("EXTRACTED DATA SUMMARY")
+    
+    # Initialize our target data
+    nvda_data = {
+        'symbol': SYMBOL,
+        'open': None,
+        'previous_close': None,
+        'current_price': None,
+        'market_cap': None,
+        'shares_outstanding': None,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    # Extract from Previous Day Aggregates
+    prev_day = results.get("Previous Day Aggregates")
+    if prev_day and prev_day.get('status') == 'OK' and prev_day.get('results'):
+        agg_data = prev_day['results'][0]
+        nvda_data['open'] = agg_data.get('o')  # Open
+        nvda_data['previous_close'] = agg_data.get('c')  # Close (previous day's close)
+        print(f"📈 Previous Day Data:")
+        print(f"   Open: ${agg_data.get('o', 'N/A')}")
+        print(f"   High: ${agg_data.get('h', 'N/A')}")
+        print(f"   Low: ${agg_data.get('l', 'N/A')}")
+        print(f"   Close: ${agg_data.get('c', 'N/A')}")
+        
+        # Format volume safely
+        volume = agg_data.get('v')
+        if volume and isinstance(volume, (int, float)):
+            print(f"   Volume: {volume:,}")
+        else:
+            print(f"   Volume: {volume or 'N/A'}")
+    
+    # Extract current price from Last Trade
+    last_trade = results.get("Last Trade (Current Price)")
+    if last_trade and last_trade.get('status') == 'OK' and last_trade.get('results'):
+        trade_data = last_trade['results']
+        nvda_data['current_price'] = trade_data.get('p')
+        print(f"\n💰 Current Price: ${trade_data.get('p', 'N/A')}")
+        
+        # Format trade size safely
+        trade_size = trade_data.get('s')
+        if trade_size and isinstance(trade_size, (int, float)):
+            print(f"   Trade Size: {trade_size:,} shares")
+        else:
+            print(f"   Trade Size: {trade_size or 'N/A'} shares")
+        
+        print(f"   Trade Time: {trade_data.get('t', 'N/A')}")
+    
+    # Extract market cap and shares from Company Details
+    company = results.get("Company Details")
+    if company and company.get('status') == 'OK' and company.get('results'):
+        company_data = company['results']
+        nvda_data['market_cap'] = company_data.get('market_cap')
+        nvda_data['shares_outstanding'] = company_data.get('share_class_shares_outstanding')
+        
+        print(f"\n🏢 Company Information:")
+        print(f"   Name: {company_data.get('name', 'N/A')}")
+        
+        # Format market cap safely
+        market_cap = company_data.get('market_cap')
+        if market_cap and isinstance(market_cap, (int, float)):
+            print(f"   Market Cap: ${market_cap:,}")
+        else:
+            print(f"   Market Cap: {market_cap or 'N/A'}")
+        
+        # Format shares outstanding safely
+        shares_out = company_data.get('share_class_shares_outstanding')
+        if shares_out and isinstance(shares_out, (int, float)):
+            print(f"   Shares Outstanding: {shares_out:,}")
+        else:
+            print(f"   Shares Outstanding: {shares_out or 'N/A'}")
+        
+        # Format weighted shares safely
+        weighted_shares = company_data.get('weighted_shares_outstanding')
+        if weighted_shares and isinstance(weighted_shares, (int, float)):
+            print(f"   Weighted Shares Outstanding: {weighted_shares:,}")
+        else:
+            print(f"   Weighted Shares Outstanding: {weighted_shares or 'N/A'}")
+        
+        print(f"   Description: {company_data.get('description', 'N/A')[:100]}...")
+    
+    # Extract from Snapshot (alternative current data)
+    snapshot = results.get("Snapshot")
+    if snapshot and snapshot.get('status') == 'OK' and snapshot.get('results'):
+        snap_data = snapshot['results'][0] if snapshot['results'] else {}
+        print(f"\n📊 Snapshot Data:")
+        print(f"   Current Price: ${snap_data.get('last', {}).get('price', 'N/A')}")
+        print(f"   Today's Change: {snap_data.get('todaysChange', 'N/A')}")
+        
+        # Format percentage safely
+        change_pct = snap_data.get('todaysChangePerc', 'N/A')
+        if change_pct and isinstance(change_pct, (int, float)):
+            print(f"   Today's Change %: {change_pct:.2f}%")
+        else:
+            print(f"   Today's Change %: {change_pct}")
+        
+        # Format volume safely
+        snap_volume = snap_data.get('volume')
+        if snap_volume and isinstance(snap_volume, (int, float)):
+            print(f"   Volume: {snap_volume:,}")
+        else:
+            print(f"   Volume: {snap_volume or 'N/A'}")
+    
+    # Calculate derived metrics
+    print_header("CALCULATED METRICS")
+    
+    if nvda_data['current_price'] and nvda_data['previous_close']:
+        price_change = nvda_data['current_price'] - nvda_data['previous_close']
+        price_change_pct = (price_change / nvda_data['previous_close']) * 100
+        print(f"💹 Price Change: ${price_change:+.2f} ({price_change_pct:+.2f}%)")
+    
+    if nvda_data['current_price'] and nvda_data['open']:
+        open_change = nvda_data['current_price'] - nvda_data['open']
+        open_change_pct = (open_change / nvda_data['open']) * 100
+        print(f"📈 Change from Open: ${open_change:+.2f} ({open_change_pct:+.2f}%)")
+    
+    if nvda_data['shares_outstanding'] and nvda_data['current_price']:
+        live_market_cap = nvda_data['shares_outstanding'] * nvda_data['current_price']
+        print(f"📊 Live Market Cap: ${live_market_cap:,.0f} (${live_market_cap/1e9:.1f}B)")
+    
+    # Summary table
+    print_header("FINAL DATA SUMMARY")
+    print(f"Symbol: {nvda_data['symbol']}")
+    print(f"Open Price: ${nvda_data['open']}")
+    print(f"Previous Close: ${nvda_data['previous_close']}")
+    print(f"Current Price: ${nvda_data['current_price']}")
+    
+    # Format market cap safely
+    if nvda_data['market_cap'] and isinstance(nvda_data['market_cap'], (int, float)):
+        print(f"Market Cap: ${nvda_data['market_cap']:,}")
+    else:
+        print(f"Market Cap: {nvda_data['market_cap'] or 'N/A'}")
+    
+    # Format shares outstanding safely
+    if nvda_data['shares_outstanding'] and isinstance(nvda_data['shares_outstanding'], (int, float)):
+        print(f"Shares Outstanding: {nvda_data['shares_outstanding']:,}")
+    else:
+        print(f"Shares Outstanding: {nvda_data['shares_outstanding'] or 'N/A'}")
+    
+    # Show raw API responses for debugging
+    print_header("RAW API RESPONSES (for debugging)")
+    for endpoint, data in results.items():
+        print_data(endpoint, data)
+    
+    return nvda_data
+
+def test_polygon_connection():
+    """Test basic Polygon API connection"""
+    print_header("TESTING POLYGON API CONNECTION")
+    
+    if not POLYGON_API_KEY:
+        print("❌ No API key found")
+        return False
+    
+    # Test with a simple endpoint
+    import requests
+    test_url = f"https://api.polygon.io/v3/reference/tickers/AAPL?apikey={POLYGON_API_KEY}"
+    
+    try:
+        response = requests.get(test_url, timeout=5)
+        if response.status_code == 200:
+            print("✅ API connection successful")
+            return True
+        else:
+            print(f"❌ API returned status {response.status_code}")
+            print(f"Response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+        return False
+
+async def main():
+    """Main test function"""
+    # Test connection first
+    if not test_polygon_connection():
+        print("\n🚨 API connection test failed. Please check your API key and internet connection.")
+        return
+    
+    # Run the full NVDA test
+    try:
+        nvda_data = await get_nvda_complete_data()
+        
+        # Export to CSV
+        import csv
+        csv_file = f"nvda_test_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        # Prepare CSV data with headers
+        fieldnames = [
+            'symbol', 'timestamp', 'open', 'previous_close', 'current_price', 
+            'market_cap', 'shares_outstanding', 'price_change', 'price_change_pct',
+            'change_from_open', 'change_from_open_pct', 'live_market_cap_billions'
+        ]
+        
+        # Calculate additional metrics for CSV
+        csv_data = nvda_data.copy()
+        
+        # Price change calculations
+        if nvda_data['current_price'] and nvda_data['previous_close']:
+            csv_data['price_change'] = nvda_data['current_price'] - nvda_data['previous_close']
+            csv_data['price_change_pct'] = (csv_data['price_change'] / nvda_data['previous_close']) * 100
+        else:
+            csv_data['price_change'] = None
+            csv_data['price_change_pct'] = None
+        
+        # Change from open calculations
+        if nvda_data['current_price'] and nvda_data['open']:
+            csv_data['change_from_open'] = nvda_data['current_price'] - nvda_data['open']
+            csv_data['change_from_open_pct'] = (csv_data['change_from_open'] / nvda_data['open']) * 100
+        else:
+            csv_data['change_from_open'] = None
+            csv_data['change_from_open_pct'] = None
+        
+        # Live market cap in billions
+        if nvda_data['shares_outstanding'] and nvda_data['current_price']:
+            live_market_cap = nvda_data['shares_outstanding'] * nvda_data['current_price']
+            csv_data['live_market_cap_billions'] = live_market_cap / 1e9
+        else:
+            csv_data['live_market_cap_billions'] = None
+        
+        # Write CSV file
+        with open(csv_file, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            # Create row with only the fieldnames we want
+            row = {field: csv_data.get(field) for field in fieldnames}
+            writer.writerow(row)
+        
+        print(f"\n📊 Data exported to CSV: {csv_file}")
+        
+        # Also export raw API responses to JSON for debugging
+        json_file = f"nvda_raw_responses_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(json_file, 'w') as f:
+            json.dump({
+                'processed_data': nvda_data,
+                'csv_data': csv_data
+            }, f, indent=2, default=str)
+        
+        print(f"📁 Raw data exported to JSON: {json_file}")
+        
+        # Print CSV preview
+        print_header("CSV DATA PREVIEW")
+        print("Headers:", ", ".join(fieldnames))
+        print("\nData Row:")
+        for field in fieldnames:
+            value = csv_data.get(field)
+            if isinstance(value, float) and value is not None:
+                if field.endswith('_pct'):
+                    print(f"  {field}: {value:.2f}%")
+                elif field == 'live_market_cap_billions':
+                    print(f"  {field}: ${value:.1f}B")
+                else:
+                    print(f"  {field}: {value:.2f}")
+            else:
+                print(f"  {field}: {value}")
+        
+    except Exception as e:
+        print(f"\n💥 Test failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    # Check if running in an async environment
+    try:
+        # If we're in Jupyter or similar, use nest_asyncio
+        import nest_asyncio
+        nest_asyncio.apply()
+        asyncio.run(main())
+    except RuntimeError:
+        # If we're already in an event loop, create a new one
+        asyncio.run(main())
+    except ImportError:
+        # Standard asyncio run
+        asyncio.run(main())

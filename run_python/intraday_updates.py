@@ -15,77 +15,159 @@ logger = logging.getLogger(__name__)
 
 async def fetch_intraday_data(session, symbol, api_key):
     """
-    Fetch current intraday data for a symbol using Polygon API.
+    Fetch improved intraday data for a symbol using Polygon API.
     
     Returns:
         dict: Contains price, volume, high, low, shares_out data
     """
     headers = {"Authorization": f"Bearer {api_key}"}
     
-    # Get last trade (current price)
-    trade_url = f"https://api.polygon.io/v2/last/trade/{symbol}"
-    # Get previous day aggregates (for volume, high, low)
-    prev_url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev"
-    # Get company details (for shares outstanding if needed)
-    company_url = f"https://api.polygon.io/v3/reference/tickers/{symbol}"
+    # Multiple endpoints for comprehensive data
+    endpoints = {
+        'last_trade': f"https://api.polygon.io/v2/last/trade/{symbol}",
+        'prev_day': f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev",
+        'company': f"https://api.polygon.io/v3/reference/tickers/{symbol}",
+        'snapshot': f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}"
+    }
     
-    result = {'symbol': symbol, 'price': None, 'volume': None, 'high': None, 'low': None, 'shares_out': None}
+    result = {
+        'symbol': symbol, 
+        'price': None, 
+        'volume': None, 
+        'high': None, 
+        'low': None, 
+        'shares_out': None,
+        'day_volume': None,
+        'day_high': None,
+        'day_low': None
+    }
     
     try:
-        # Fetch trade data
-        async with session.get(trade_url, headers=headers, timeout=REQUEST_TIMEOUT) as resp:
+        # Fetch last trade for current price (most important)
+        async with session.get(endpoints['last_trade'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('status') == 'OK' and data.get('results'):
                     result['price'] = data['results'].get('p')
         
-        # Fetch aggregates data  
-        async with session.get(prev_url, headers=headers, timeout=REQUEST_TIMEOUT) as resp:
+        # Fetch snapshot for comprehensive current day data
+        async with session.get(endpoints['snapshot'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('status') == 'OK' and data.get('results'):
+                    ticker_data = data['results']
+                    
+                    # Get today's trading data
+                    day_data = ticker_data.get('day', {})
+                    if day_data:
+                        result['day_volume'] = day_data.get('v')
+                        result['day_high'] = day_data.get('h')
+                        result['day_low'] = day_data.get('l')
+                        
+                        # Use snapshot price if we don't have last trade price
+                        if not result['price']:
+                            result['price'] = day_data.get('c')  # Current close from snapshot
+                    
+                    # Get last trade from snapshot as backup
+                    if not result['price']:
+                        last_trade = ticker_data.get('lastTrade', {})
+                        if last_trade:
+                            result['price'] = last_trade.get('p')
+        
+        # Fetch previous day aggregates for volume/high/low fallback
+        async with session.get(endpoints['prev_day'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('status') == 'OK' and data.get('results'):
                     agg_data = data['results'][0]
-                    result['volume'] = agg_data.get('v')
-                    result['high'] = agg_data.get('h')
-                    result['low'] = agg_data.get('l')
+                    
+                    # Use as fallback if we don't have current day data
+                    if not result['volume']:
+                        result['volume'] = agg_data.get('v')
+                    if not result['high']:
+                        result['high'] = agg_data.get('h')
+                    if not result['low']:
+                        result['low'] = agg_data.get('l')
         
-        # Fetch company data for shares outstanding
-        async with session.get(company_url, headers=headers, timeout=REQUEST_TIMEOUT) as resp:
+        # Fetch company data for shares outstanding (only if not already available)
+        async with session.get(endpoints['company'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('status') == 'OK' and data.get('results'):
-                    result['shares_out'] = data['results'].get('share_class_shares_outstanding')
+                    company_data = data['results']
+                    
+                    # IMPROVED: Try multiple fields for shares outstanding
+                    shares_out = (
+                        company_data.get('share_class_shares_outstanding') or
+                        company_data.get('weighted_shares_outstanding') or
+                        company_data.get('shares_outstanding')
+                    )
+                    result['shares_out'] = shares_out
         
+        # Prioritize current day data over previous day data
+        if result['day_volume']:
+            result['volume'] = result['day_volume']
+        if result['day_high']:
+            result['high'] = result['day_high']
+        if result['day_low']:
+            result['low'] = result['day_low']
+        
+    except asyncio.TimeoutError:
+        logger.debug(f"Timeout fetching intraday data for {symbol}")
     except Exception as e:
         logger.debug(f"Error fetching intraday data for {symbol}: {e}")
     
     return result
 
 async def fetch_batch_intraday_data(symbols, api_key, max_concurrent=50):
-    """Fetch intraday data for a batch of symbols"""
+    """Fetch intraday data for a batch of symbols with improved error handling"""
     if not symbols:
         return []
     
-    connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=max_concurrent)
+    connector = aiohttp.TCPConnector(
+        limit=max_concurrent, 
+        limit_per_host=max_concurrent,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        enable_cleanup_closed=True
+    )
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
     
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        tasks = [fetch_intraday_data(session, symbol, api_key) for symbol in symbols]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    async with aiohttp.ClientSession(
+        connector=connector, 
+        timeout=timeout,
+        headers={'User-Agent': 'PolygonIntradayCollector/1.0'}
+    ) as session:
+        # Process in smaller sub-batches to avoid overwhelming the API
+        sub_batch_size = min(25, len(symbols))
+        all_results = []
         
-        # Filter out exceptions
-        valid_results = []
-        for result in results:
-            if isinstance(result, dict):
-                valid_results.append(result)
-            else:
-                logger.debug(f"Exception in batch fetch: {result}")
+        for i in range(0, len(symbols), sub_batch_size):
+            sub_batch = symbols[i:i + sub_batch_size]
+            tasks = [fetch_intraday_data(session, symbol, api_key) for symbol in sub_batch]
+            
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Filter out exceptions and add valid results
+                for result in results:
+                    if isinstance(result, dict):
+                        all_results.append(result)
+                    else:
+                        logger.debug(f"Exception in batch fetch: {result}")
+                
+                # Small delay between sub-batches
+                if i + sub_batch_size < len(symbols):
+                    await asyncio.sleep(0.1)
+                    
+            except Exception as e:
+                logger.warning(f"Error processing sub-batch {i//sub_batch_size + 1}: {e}")
         
-        return valid_results
+        return all_results
 
 def update_intraday_data_and_qualified(date_str=None, time_str=None, include_high_low=True):
     """
-    Update raw data with intraday prices and volumes, recalculate qualified status.
+    IMPROVED: Update raw data with intraday prices and volumes, recalculate qualified status.
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
@@ -118,16 +200,16 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         # Prioritize qualified symbols, but update all
         priority_symbols = qualified_symbols + [s for s in all_symbols if s not in qualified_symbols]
         
-        logger.info(f"Updating intraday data for {len(priority_symbols)} symbols at {time_str}")
+        logger.info(f"Updating IMPROVED intraday data for {len(priority_symbols)} symbols at {time_str}")
         if qualified_symbols:
             logger.info(f"Prioritizing {len(qualified_symbols)} qualified symbols")
         
-        # Fetch intraday data
+        # Fetch intraday data with improved logic
         start_time = time.time()
         intraday_data = asyncio.run(fetch_batch_intraday_data(priority_symbols, POLYGON_API_KEY))
         fetch_time = time.time() - start_time
         
-        logger.info(f"Fetched intraday data for {len(intraday_data)} symbols in {fetch_time:.1f}s")
+        logger.info(f"Fetched IMPROVED intraday data for {len(intraday_data)} symbols in {fetch_time:.1f}s")
         
         # Create mapping for quick lookup
         data_map = {item['symbol']: item for item in intraday_data}
@@ -158,8 +240,10 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         if shares_col not in df.columns:
             df[shares_col] = np.nan
         
-        # Update data for each symbol
+        # Update data for each symbol with improved logic
         updated_count = 0
+        shares_updated_count = 0
+        
         for symbol in priority_symbols:
             symbol_data = data_map.get(symbol, {})
             
@@ -187,13 +271,16 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
                 if symbol_data.get('low') is not None:
                     df.loc[symbol_mask, low_col] = symbol_data['low']
             
-            # Update shares outstanding if available and not already set
+            # IMPROVED: Update shares outstanding if available and not already set
             if symbol_data.get('shares_out') is not None:
                 current_shares = df.loc[symbol_mask, shares_col].iloc[0]
-                if pd.isna(current_shares) or current_shares in [None, 'N/A']:
+                if pd.isna(current_shares) or current_shares in [None, 'N/A', 0]:
                     df.loc[symbol_mask, shares_col] = symbol_data['shares_out']
+                    shares_updated_count += 1
         
         logger.info(f"Updated price data for {updated_count} symbols")
+        if shares_updated_count > 0:
+            logger.info(f"Updated shares outstanding for {shares_updated_count} symbols")
         
         # Calculate percentage change from open and market cap
         def calc_pct_change(row):
@@ -241,11 +328,16 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         total_count = len(df)
         qualified_rate = (qualified_count / total_count) * 100 if total_count > 0 else 0
         
+        # Count stocks with market cap data
+        mcap_count = df[mcap_col].notna().sum()
+        mcap_rate = (mcap_count / total_count) * 100 if total_count > 0 else 0
+        
         logger.info(f"Qualification update: {qualified_count}/{total_count} stocks qualified ({qualified_rate:.1f}%)")
+        logger.info(f"Market cap coverage: {mcap_count}/{total_count} stocks ({mcap_rate:.1f}%)")
         
         # Save updated CSV
         df.to_csv(local_path, index=False)
-        logger.info(f"Updated {local_path} with intraday data and qualification at {time_str}")
+        logger.info(f"Updated {local_path} with IMPROVED intraday data and qualification at {time_str}")
         
         # Upload to S3
         if AWS_S3_ENABLED and S3_BUCKET:
@@ -259,25 +351,27 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         newly_qualified = df[df['qualified'].str.contains('True')].copy()
         
         message = (
-            f"📈 INTRADAY UPDATE COMPLETE\n\n"
+            f"📈 IMPROVED INTRADAY UPDATE COMPLETE\n\n"
             f"Date: {date_str}\n"
             f"Time: {time_str} CDT\n"
             f"Updated: {updated_count}/{len(priority_symbols)} symbols\n"
             f"Qualified stocks: {qualified_count:,} ({qualified_rate:.1f}%)\n"
-            f"Data fetch time: {fetch_time:.1f}s\n\n"
+            f"Market cap coverage: {mcap_count:,} ({mcap_rate:.1f}%)\n"
+            f"Data fetch time: {fetch_time:.1f}s\n"
+            f"Shares data updated: {shares_updated_count} symbols\n\n"
         )
         
         if include_high_low:
-            message += f"📊 Updated columns: price, volume, high, low, market cap, % change\n"
+            message += f"📊 Updated columns: price, volume, high, low, market cap, % change, shares\n"
         else:
-            message += f"📊 Updated columns: price, volume, market cap, % change\n"
+            message += f"📊 Updated columns: price, volume, market cap, % change, shares\n"
         
         if qualified_count > 0:
-            # Sort by percentage change or market cap
+            # Sort by percentage change or market cap - FIXED: using na_position instead of na_last
             if pct_col in newly_qualified.columns:
-                newly_qualified = newly_qualified.sort_values(pct_col, ascending=False, na_last=True)
-            elif 'intraday_market_cap_millions' in newly_qualified.columns:
-                newly_qualified = newly_qualified.sort_values('intraday_market_cap_millions', ascending=False, na_last=True)
+                newly_qualified = newly_qualified.sort_values(pct_col, ascending=False, na_position='last')
+            elif mcap_col in newly_qualified.columns:
+                newly_qualified = newly_qualified.sort_values(mcap_col, ascending=False, na_position='last')
             
             message += f"\n🎯 TOP QUALIFIED STOCKS:\n"
             
@@ -287,19 +381,41 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
                 current_price = stock.get(price_col, stock.get('current_price', 0))
                 pct_change = stock.get(pct_col, 0)
                 volume = stock.get(vol_col, stock.get('volume', 0))
+                market_cap = stock.get(mcap_col, 0)
                 
-                message += f"{symbol}: {pct_change:+.1f}% (${current_price:.2f}), Vol: {int(volume):,}\n"
+                # Format market cap
+                if pd.notna(market_cap) and market_cap > 0:
+                    if market_cap >= 1000:
+                        mcap_str = f"${market_cap/1000:.1f}B"
+                    else:
+                        mcap_str = f"${market_cap:.0f}M"
+                else:
+                    mcap_str = "N/A"
+                
+                # Format volume
+                if pd.notna(volume) and volume > 0:
+                    if volume >= 1_000_000:
+                        vol_str = f"{volume/1_000_000:.1f}M"
+                    elif volume >= 1_000:
+                        vol_str = f"{volume/1_000:.0f}K"
+                    else:
+                        vol_str = f"{int(volume):,}"
+                else:
+                    vol_str = "N/A"
+                
+                message += f"{symbol}: {pct_change:+.1f}% (${current_price:.2f}), Vol: {vol_str}, MCap: {mcap_str}\n"
         else:
             message += f"\n⚠️ No stocks currently meet qualification criteria"
         
         message += f"\n📁 File: stock_data/{date_str}/{local_path}"
+        message += f"\n✨ IMPROVEMENTS: Better API coverage, enhanced shares data, improved error handling"
         
         # Send notification
         if SNS_TOPIC_ARN:
             data_type = "Full" if include_high_low else "Basic"
-            subject = f"📈 {data_type} Intraday Update - {qualified_count} qualified ({time_str})"
+            subject = f"📈 IMPROVED {data_type} Intraday Update - {qualified_count} qualified ({time_str})"
             if qualified_count == 0:
-                subject = f"⚠️ {data_type} Intraday Update - No qualified stocks ({time_str})"
+                subject = f"⚠️ IMPROVED {data_type} Intraday Update - No qualified stocks ({time_str})"
             
             send_sns_notification(SNS_TOPIC_ARN, subject, message)
         
@@ -380,7 +496,7 @@ if __name__ == "__main__":
         if re.match(r'^\d{2}:\d{2}$', sys.argv[3]):
             time_str = sys.argv[3]
     
-    print(f"Running {update_type} intraday update...")
+    print(f"Running IMPROVED {update_type} intraday update...")
     if date_str:
         print(f"Date: {date_str}")
     if time_str:
@@ -393,7 +509,7 @@ if __name__ == "__main__":
         success = update_full_intraday_data(date_str, time_str)
     
     if success:
-        print(f"✅ {update_type.title()} intraday update completed successfully")
+        print(f"✅ IMPROVED {update_type.title()} intraday update completed successfully")
         
         # Show current qualified count
         qualified = get_qualified_symbols(date_str)

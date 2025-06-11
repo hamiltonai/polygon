@@ -30,33 +30,40 @@ async def fetch_with_retry(session, url, headers, symbol, max_retries=MAX_RETRIE
                     if data.get('status') == 'OK':
                         return data
                     else:
+                        logger.debug(f"API returned non-OK status for {symbol}: {data.get('status')}")
                         return None
                 elif response.status == 429:  # Rate limited
                     wait_time = RETRY_DELAY * (attempt + 1)
+                    logger.debug(f"Rate limited for {symbol}, waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     continue
                 elif response.status == 404:
+                    logger.debug(f"Symbol {symbol} not found (404)")
                     return None
                 elif response.status >= 500:
                     wait_time = RETRY_DELAY * (attempt + 1)
+                    logger.debug(f"Server error {response.status} for {symbol}, retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     continue
                 else:
+                    logger.debug(f"HTTP {response.status} for {symbol}")
                     return None
                     
         except asyncio.TimeoutError:
             if attempt == max_retries - 1:
+                logger.debug(f"Final timeout for {symbol}")
                 return None
             await asyncio.sleep(RETRY_DELAY * (attempt + 1))
         except Exception as e:
             if attempt == max_retries - 1:
+                logger.debug(f"Final error for {symbol}: {e}")
                 return None
             await asyncio.sleep(RETRY_DELAY * (attempt + 1))
     
     return None
 
 async def get_complete_stock_data(session, symbol, api_key, stats):
-    """Get complete stock data with quality validation"""
+    """Get complete stock data with improved shares outstanding handling"""
     headers = {"Authorization": f"Bearer {api_key}"}
     
     # Create tasks for both endpoints
@@ -93,15 +100,17 @@ async def get_complete_stock_data(session, symbol, api_key, stats):
                 'low': low_price,
                 'close': close_price,
                 'volume': volume,
-                'current_price': close_price,  # Use close as current price
+                'current_price': close_price,  # Use close as current price initially
                 'avg_volume': volume,  # Use current volume as avg volume proxy
             })
         else:
             # Missing or invalid OHLCV data - mark as incomplete
+            logger.debug(f"Invalid OHLCV data for {symbol}: o={open_price}, h={high_price}, l={low_price}, c={close_price}, v={volume}")
             update_stats(stats, incomplete_records=1)
             return None
     else:
         # No previous day data - mark as incomplete
+        logger.debug(f"No previous day data for {symbol}")
         update_stats(stats, incomplete_records=1)
         return None
     
@@ -109,6 +118,7 @@ async def get_complete_stock_data(session, symbol, api_key, stats):
     company_name = 'N/A'
     market_cap = None
     shares_outstanding = None
+    weighted_shares_outstanding = None
     intraday_market_cap_millions = None
     
     if isinstance(company_data, dict) and company_data.get('results'):
@@ -117,12 +127,21 @@ async def get_complete_stock_data(session, symbol, api_key, stats):
         company_name = result.get('name', 'N/A')
         market_cap = result.get('market_cap')
         
-        # Try multiple fields for shares outstanding (Polygon uses different field names)
+        # IMPROVED: Try multiple fields for shares outstanding with proper fallback
         shares_outstanding = (
             result.get('share_class_shares_outstanding') or
             result.get('weighted_shares_outstanding') or
             result.get('shares_outstanding')
         )
+        
+        # Also store weighted shares as backup info
+        weighted_shares_outstanding = result.get('weighted_shares_outstanding')
+        
+        # Debug logging for major stocks
+        if symbol in ['AAPL', 'NVDA', 'MSFT', 'GOOGL', 'AMZN']:
+            logger.debug(f"{symbol} shares data: share_class={result.get('share_class_shares_outstanding')}, "
+                        f"weighted={result.get('weighted_shares_outstanding')}, "
+                        f"shares_outstanding={result.get('shares_outstanding')}")
         
         # Calculate intraday market cap if we have both pieces
         current_price = stock_data.get('current_price')
@@ -133,11 +152,16 @@ async def get_complete_stock_data(session, symbol, api_key, stats):
             estimated_shares = market_cap / current_price
             intraday_market_cap_millions = market_cap / 1_000_000
             shares_outstanding = estimated_shares
+            logger.debug(f"Estimated shares for {symbol}: {estimated_shares:,.0f} (from market_cap / price)")
+    else:
+        # Log when we can't get company data
+        logger.debug(f"No company data for {symbol}")
     
     stock_data.update({
         'company_name': company_name,
         'market_cap': market_cap,
         'share_class_shares_outstanding': shares_outstanding,
+        'weighted_shares_outstanding': weighted_shares_outstanding,
         'intraday_market_cap_millions': intraday_market_cap_millions,
     })
     
@@ -175,6 +199,8 @@ def is_complete_record(stock_data):
     
     # Basic sanity checks
     if not (low_price <= open_price <= high_price and low_price <= close_price <= high_price):
+        logger.debug(f"Sanity check failed for {stock_data.get('symbol', 'Unknown')}: "
+                    f"low={low_price}, open={open_price}, high={high_price}, close={close_price}")
         return False
     
     return True
@@ -211,6 +237,7 @@ async def process_batch_async(symbols_batch, api_key, stats):
                 complete_results.append(result)
             else:
                 if isinstance(result, Exception):
+                    logger.debug(f"Exception for {symbol}: {result}")
                     update_stats(stats, filtered_out=1)
                 # incomplete_records already updated in get_complete_stock_data
         
@@ -320,7 +347,7 @@ def get_symbols_with_fallback():
 
 def run_initial_data_pull(date_str=None, max_symbols=None):
     """
-    Run quality-focused initial data pull with complete record filtering.
+    Run improved initial data pull with better shares outstanding handling.
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
@@ -344,7 +371,10 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
             symbols = symbols[:max_symbols]
             logger.info(f"Limited to {max_symbols} symbols for testing")
         
-        logger.info(f"Starting QUALITY FILTERED data pull for {len(symbols)} symbols...")
+        logger.info(f"Starting IMPROVED initial data pull for {len(symbols)} symbols...")
+        logger.info(f"Settings: {MAX_CONCURRENT_REQUESTS} concurrent, {REQUEST_TIMEOUT}s timeout, "
+                   f"{MAX_RETRIES} retries, {BATCH_SIZE} batch size")
+        logger.info("Improvements: Better shares outstanding handling, enhanced error logging")
         
         start_time = time.time()
         
@@ -375,7 +405,10 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
             batch_time = time.time() - batch_start_time
             complete_rate = (stats['complete_records'] / stats['processed']) * 100 if stats['processed'] > 0 else 0
             
-            logger.info(f"Batch {batch_num}/{total_batches}: {stats['complete_records']} complete ({complete_rate:.1f}%)")
+            logger.info(f"Batch {batch_num} completed in {batch_time:.1f}s "
+                       f"({len(batch)/batch_time:.1f} symbols/sec)")
+            logger.info(f"Progress: {stats['processed']}/{len(symbols)} processed, "
+                       f"{stats['complete_records']} complete records ({complete_rate:.1f}%)")
             
             # Delay between batches for API stability
             if i + BATCH_SIZE < len(symbols):
@@ -391,12 +424,16 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
         if complete_rate < MIN_COMPLETE_RATE * 100:
             logger.warning(f"Quality below threshold: {complete_rate:.1f}% < {MIN_COMPLETE_RATE*100}%")
         
+        # Count records with shares outstanding data
+        shares_count = sum(1 for r in all_complete_results if r.get('share_class_shares_outstanding'))
+        shares_rate = (shares_count / len(all_complete_results)) * 100 if all_complete_results else 0
+        
         # Write ONLY complete results to CSV
         filename = f"raw_data_{date_str}.csv"
         fieldnames = [
             'symbol', 'company_name', 'open', 'high', 'low', 'close', 'volume', 
             'current_price', 'avg_volume', 'market_cap', 'share_class_shares_outstanding',
-            'intraday_market_cap_millions', 'current_price_pct_change_from_open'
+            'weighted_shares_outstanding', 'intraday_market_cap_millions', 'current_price_pct_change_from_open'
         ]
         
         with open(filename, "w", newline="") as f:
@@ -421,13 +458,14 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
             s3_key = f"stock_data/{date_str}/{filename}"
             if not upload_to_s3(S3_BUCKET, s3_key, filename):
                 raise Exception("Failed to upload to S3")
+            logger.info(f"Data uploaded to S3: {s3_key}")
         
         # Performance and quality summary
         symbols_per_second = len(symbols) / total_time
         retry_rate = (stats['retries'] / stats['api_calls']) * 100 if stats['api_calls'] > 0 else 0
         
         summary = (
-            f"🎯 QUALITY FILTERED DATA PULL COMPLETE\n\n"
+            f"🎯 IMPROVED INITIAL DATA PULL COMPLETE\n\n"
             f"📊 PROCESSING METRICS:\n"
             f"   Total symbols attempted: {format_number(len(symbols))}\n"
             f"   Total time: {format_duration(total_time)}\n"
@@ -436,13 +474,16 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
             f"   Retries performed: {format_number(stats['retries'])} ({retry_rate:.1f}% of calls)\n\n"
             f"📈 QUALITY RESULTS:\n"
             f"   Complete records: {format_number(stats['complete_records'])} ({complete_rate:.1f}%)\n"
+            f"   Records with shares outstanding: {format_number(shares_count)} ({shares_rate:.1f}%)\n"
             f"   Incomplete records: {format_number(stats['incomplete_records'])}\n"
             f"   Failed requests: {format_number(stats['filtered_out'])}\n"
             f"   Records in final dataset: {format_number(len(all_complete_results))}\n\n"
-            f"✨ DATA QUALITY:\n"
-            f"   All records have complete OHLCV data\n"
-            f"   All records pass sanity checks (high >= low, etc.)\n"
-            f"   Sorted by market cap (largest first)\n\n"
+            f"✨ DATA QUALITY IMPROVEMENTS:\n"
+            f"   ✓ All records have complete OHLCV data\n"
+            f"   ✓ Improved shares outstanding fallback logic\n"
+            f"   ✓ Enhanced error logging and debugging\n"
+            f"   ✓ Better market cap calculations\n"
+            f"   ✓ Sorted by market cap (largest first)\n\n"
             f"📁 OUTPUT: {filename}\n"
             f"📂 S3: stock_data/{date_str}/{filename}"
         )
@@ -451,7 +492,7 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
         
         # Send success notification
         if SNS_TOPIC_ARN:
-            subject = f"✅ Initial Data Pull Complete - {format_number(len(all_complete_results))} stocks"
+            subject = f"✅ Improved Initial Data Pull Complete - {format_number(len(all_complete_results))} stocks"
             if complete_rate >= MIN_COMPLETE_RATE * 100:
                 subject += " (Quality Target Met)"
             else:
@@ -498,7 +539,7 @@ if __name__ == "__main__":
     # Test the function
     success = run_initial_data_pull(max_symbols=max_symbols)
     if success:
-        print("✅ Initial data pull completed successfully")
+        print("✅ Improved initial data pull completed successfully")
     else:
         print("❌ Initial data pull failed")
         exit(1)

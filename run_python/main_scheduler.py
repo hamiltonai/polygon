@@ -31,7 +31,7 @@ class PolygonWorkflowScheduler:
             ('08:24', self._run_premarket_gainers, 'Premarket Top Gainers', False),
             ('08:27', self._run_nasdaq_symbols, 'NASDAQ Symbols Collection', False),
             ('08:35', self._run_initial_data_pull, 'Initial Data Pull', True),  # Critical
-            ('08:44', self._run_qualification_filter, 'Initial Qualification', True),  # Critical
+            ('08:39', self._run_qualification_filter, 'Initial Qualification', True),  # Critical
             ('08:45', self._run_basic_intraday_update, 'Basic Intraday Update (08:45)', False),
             ('08:50', self._run_full_intraday_update, 'Full Intraday Update (08:50)', False),
             ('08:55', self._run_full_intraday_update, 'Full Intraday Update (08:55)', False),
@@ -261,7 +261,7 @@ class PolygonWorkflowScheduler:
                     break
                 
                 # Sleep before next check
-                time.sleep(30)  # Check every 30 seconds
+                time.sleep(10)  # Check every 10 seconds
                 
             except KeyboardInterrupt:
                 logger.info("Received keyboard interrupt, stopping scheduler...")
