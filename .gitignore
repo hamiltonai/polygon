@@ -63,10 +63,6 @@ Thumbs.db
 *.ipynb
 
 # Output and Data Files
-raw_data_*.csv
-nasdaq_symbols_*.csv
-premarket_top_gainers_*.csv
-stock_data_*.csv
 *.json
 *.xlsx
 *.xls
