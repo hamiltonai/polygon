@@ -1,9 +1,15 @@
 import pandas as pd
+import numpy as np
+import asyncio
+import aiohttp
 import logging
 import re
 from datetime import datetime
 import pytz
-from config import S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED
+from config import (
+    POLYGON_API_KEY, S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED, REQUEST_TIMEOUT,
+    MIN_VOLUME_MILLIONS, MIN_PRICE_CHANGE_PCT, MAX_PRICE_CHANGE_PCT
+)
 from utils import (
     get_date_str, get_time_str, upload_to_s3, download_from_s3, 
     send_sns_notification
@@ -11,17 +17,106 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
-def is_after_qualification_time():
-    """Check if current Chicago time is after 8:50 AM"""
-    cst = pytz.timezone('America/Chicago')
-    now_cst = datetime.now(cst)
-    cutoff_time = now_cst.replace(hour=8, minute=50, second=0, microsecond=0)
+def ensure_filtered_data_exists(date_str, s3_bucket):
+    """
+    Ensure filtered_raw_data_YYYYMMDD.csv exists locally.
+    Downloads from S3 if available, otherwise raises an error.
     
-    return now_cst >= cutoff_time
+    Returns:
+        str: Local path to the filtered data file
+    """
+    filename = f"filtered_raw_data_{date_str}.csv"
+    s3_key = f"stock_data/{date_str}/{filename}"
+    
+    # Try to download from S3
+    if download_from_s3(s3_bucket, s3_key, filename):
+        logger.info(f"Downloaded {filename} from S3")
+        return filename
+    else:
+        raise FileNotFoundError(f"Filtered data file not found: {s3_key}")
+
+async def fetch_current_price_and_volume(session, symbol, api_key):
+    """Fetch current price and volume for a symbol using snapshot endpoint"""
+    headers = {"Authorization": f"Bearer {api_key}"}
+    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}"
+    
+    try:
+        async with session.get(url, headers=headers, timeout=REQUEST_TIMEOUT) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('status') == 'OK' and data.get('results'):
+                    ticker_data = data['results']
+                    
+                    # Get current price from last trade or day data
+                    current_price = None
+                    last_trade = ticker_data.get('lastTrade', {})
+                    if last_trade:
+                        current_price = last_trade.get('p')
+                    
+                    # Get volume from day data
+                    volume = None
+                    day_data = ticker_data.get('day', {})
+                    if day_data:
+                        volume = day_data.get('v')
+                        # Use day close if we don't have last trade price
+                        if not current_price:
+                            current_price = day_data.get('c')
+                    
+                    return {
+                        'symbol': symbol,
+                        'current_price': current_price,
+                        'volume': volume
+                    }
+    except Exception as e:
+        logger.debug(f"Error fetching data for {symbol}: {e}")
+    
+    return {
+        'symbol': symbol,
+        'current_price': None,
+        'volume': None
+    }
+
+async def fetch_batch_current_data(symbols, api_key, max_concurrent=50):
+    """Fetch current price and volume data for a batch of symbols"""
+    if not symbols:
+        return []
+    
+    connector = aiohttp.TCPConnector(
+        limit=max_concurrent, 
+        limit_per_host=max_concurrent,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        enable_cleanup_closed=True
+    )
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+    
+    async with aiohttp.ClientSession(
+        connector=connector, 
+        timeout=timeout,
+        headers={'User-Agent': 'PolygonQualificationChecker/1.0'}
+    ) as session:
+        tasks = [fetch_current_price_and_volume(session, symbol, api_key) for symbol in symbols]
+        
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Filter out exceptions and return valid results
+            valid_results = []
+            for result in results:
+                if isinstance(result, dict):
+                    valid_results.append(result)
+                else:
+                    logger.debug(f"Exception in batch fetch: {result}")
+            
+            return valid_results
+            
+        except Exception as e:
+            logger.warning(f"Error in batch fetch: {e}")
+            return []
 
 def has_required_data_for_qualification(row):
     """
-    Check if row has all required non-null data for qualification calculation
+    Check if row has all required non-null data for 8:37 qualification
     Required: volume, current_price, close (previous close), open
     """
     required_fields = ['volume', 'current_price', 'close', 'open']
@@ -41,136 +136,143 @@ def has_required_data_for_qualification(row):
     
     return True
 
-def calculate_qualification(row):
+def calculate_8_37_qualification(row):
     """
-    Check if a stock meets all qualifying criteria:
-    - volume > 300K
-    - current price >= 2.5% from previous close
-    - close >= $0.01
-    - open > close (gap up)
+    Check if a stock meets 8:37 qualifying criteria:
+    - 8:37 volume >= 1 Million
+    - 8:37 price >= 5% and <= 60% from previous close price
+    - 8:37 price should be > today's open price
     
     Args:
         row: DataFrame row with stock data
         
     Returns:
-        bool: True if qualified, False otherwise, None if data insufficient
+        tuple: (is_qualified: bool, reason: str)
     """
     try:
         # Check if we have all required data
         if not has_required_data_for_qualification(row):
-            return None
+            return False, "Missing required data"
         
         # Get values and convert to float
         volume = float(row.get('volume', 0))
         close = float(row.get('close', 0))  # Previous close
-        open_price = float(row.get('open', 0))
-        current_price = float(row.get('current_price', 0))
+        open_price = float(row.get('open', 0))  # Today's open
+        current_price = float(row.get('current_price', 0))  # 8:37 price
+        
+        # Check volume criterion (≥ 1 Million)
+        if volume < MIN_VOLUME_MILLIONS * 1_000_000:
+            return False, f"Volume too low: {volume:,.0f} < {MIN_VOLUME_MILLIONS*1_000_000:,.0f}"
         
         # Calculate percentage change from previous close
-        if close > 0:
-            pct_change = ((current_price - close) / close) * 100
-        else:
-            return None
+        if close <= 0:
+            return False, "Invalid previous close price"
         
-        # Apply all criteria
-        criteria_met = (
-            volume > 300_000 and                    # Volume > 300K
-            pct_change >= 2.5 and                   # >= 2.5% from previous close
-            close >= 0.01 and                       # Previous close >= $0.01
-            open_price > close                       # Gap up (open > previous close)
-        )
+        pct_change = ((current_price - close) / close) * 100
         
-        return criteria_met
+        # Check price change range (5% to 60%)
+        if pct_change < MIN_PRICE_CHANGE_PCT:
+            return False, f"Price gain too low: {pct_change:.1f}% < {MIN_PRICE_CHANGE_PCT}%"
         
-    except (ValueError, TypeError):
-        return None
+        if pct_change > MAX_PRICE_CHANGE_PCT:
+            return False, f"Price gain too high: {pct_change:.1f}% > {MAX_PRICE_CHANGE_PCT}%"
+        
+        # Check if current price > today's open
+        if current_price <= open_price:
+            return False, f"Price not above open: ${current_price:.2f} <= ${open_price:.2f}"
+        
+        # All criteria met
+        return True, f"Qualified: Vol={volume/1_000_000:.1f}M, Gain={pct_change:.1f}%, Above open"
+        
+    except (ValueError, TypeError) as e:
+        return False, f"Data error: {str(e)}"
 
-def ensure_raw_data_exists(date_str, s3_bucket):
+def run_8_37_qualification(date_str=None, time_str=None):
     """
-    Ensure raw_data_YYYYMMDD.csv exists locally.
-    Downloads from S3 if available, otherwise raises an error.
-    
-    Returns:
-        str: Local path to the raw data file
-    """
-    filename = f"raw_data_{date_str}.csv"
-    s3_key = f"stock_data/{date_str}/{filename}"
-    
-    # Try to download from S3
-    if download_from_s3(s3_bucket, s3_key, filename):
-        logger.info(f"Downloaded {filename} from S3")
-        return filename
-    else:
-        raise FileNotFoundError(f"Raw data file not found: {s3_key}")
-
-def update_qualified_column(date_str=None):
-    """
-    Update the raw_data CSV with qualified column.
-    Only sets True/False after 8:50 AM CDT and when all required data is present.
-    Otherwise sets 'N/A'.
+    Run 8:37 qualification on filtered dataset with current day data
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
+        time_str: Time string (HH:MM), defaults to current time
         
     Returns:
         bool: True if successful, False otherwise
     """
     if not date_str:
         date_str = get_date_str()
+    if not time_str:
+        time_str = get_time_str()
     
     try:
-        # Check if it's after qualification time
-        after_qualification_time = is_after_qualification_time()
-        current_time = get_time_str()
+        # Ensure filtered data file exists
+        local_path = ensure_filtered_data_exists(date_str, S3_BUCKET)
         
-        # Ensure raw data file exists
-        local_path = ensure_raw_data_exists(date_str, S3_BUCKET)
-        
-        # Read the CSV
+        # Read the filtered CSV
         df = pd.read_csv(local_path)
         
         if df.empty:
-            logger.warning(f"Raw data file {local_path} is empty")
+            logger.warning(f"Filtered data file {local_path} is empty")
             return False
         
-        logger.info(f"Processing {len(df)} stocks for qualification...")
-        logger.info(f"After 8:50 AM? {after_qualification_time}")
+        logger.info(f"Running 8:37 qualification on {len(df)} pre-filtered stocks...")
         
-        def apply_qualification(row):
-            """Apply qualification logic with time and data checks"""
-            
-            # If not after 8:50 AM, return N/A
-            if not after_qualification_time:
-                return f"[{current_time}] - N/A (Before 8:50 AM)"
-            
-            # Check if we have all required data
-            if not has_required_data_for_qualification(row):
-                return f"[{current_time}] - N/A (Missing Data)"
-            
-            # Calculate qualification
-            is_qualified = calculate_qualification(row)
-            
-            if is_qualified is None:
-                return f"[{current_time}] - N/A (Invalid Data)"
-            elif is_qualified:
-                return f"[{current_time}] - True"
-            else:
-                return f"[{current_time}] - False"
+        # Get all symbols for current data fetch
+        symbols = df['symbol'].tolist()
         
-        # Add or update the qualified column
-        df['qualified'] = df.apply(apply_qualification, axis=1)
+        # Fetch current prices and volumes
+        logger.info(f"Fetching current data for {len(symbols)} symbols...")
+        start_time = time.time()
+        current_data = asyncio.run(fetch_batch_current_data(symbols, POLYGON_API_KEY))
+        fetch_time = time.time() - start_time
         
-        # Count different qualification statuses
-        true_count = df['qualified'].str.contains('True', na=False).sum()
-        false_count = df['qualified'].str.contains('False', na=False).sum()
-        na_count = df['qualified'].str.contains('N/A', na=False).sum()
-        total_count = len(df)
+        logger.info(f"Fetched current data for {len(current_data)} symbols in {fetch_time:.1f}s")
         
-        logger.info(f"Qualification results: {true_count} qualified, {false_count} not qualified, {na_count} N/A")
+        # Create mapping for quick lookup
+        current_data_map = {item['symbol']: item for item in current_data}
+        
+        # Add 8:37 data columns
+        df[f'price_8_37'] = np.nan
+        df[f'volume_8_37'] = np.nan
+        df[f'qualified_8_37'] = 'N/A'
+        df[f'qualification_reason'] = 'N/A'
+        
+        # Update data and apply qualification
+        qualified_count = 0
+        updated_count = 0
+        
+        for idx, row in df.iterrows():
+            symbol = row['symbol']
+            current_info = current_data_map.get(symbol, {})
+            
+            # Update 8:37 price and volume
+            current_price = current_info.get('current_price')
+            current_volume = current_info.get('volume')
+            
+            if current_price is not None:
+                df.loc[idx, 'price_8_37'] = current_price
+                df.loc[idx, 'current_price'] = current_price  # Update current_price for qualification
+                updated_count += 1
+            
+            if current_volume is not None:
+                df.loc[idx, 'volume_8_37'] = current_volume
+                df.loc[idx, 'volume'] = current_volume  # Update volume for qualification
+            
+            # Apply qualification logic
+            updated_row = df.loc[idx].to_dict()
+            is_qualified, reason = calculate_8_37_qualification(updated_row)
+            
+            df.loc[idx, 'qualified_8_37'] = is_qualified
+            df.loc[idx, 'qualification_reason'] = reason
+            
+            if is_qualified:
+                qualified_count += 1
+        
+        logger.info(f"8:37 qualification results: {qualified_count}/{len(df)} stocks qualified")
+        logger.info(f"Updated price data for {updated_count}/{len(df)} stocks")
         
         # Save updated CSV
         df.to_csv(local_path, index=False)
-        logger.info(f"Updated {local_path} with qualified column")
+        logger.info(f"Updated {local_path} with 8:37 qualification data")
         
         # Upload to S3
         if AWS_S3_ENABLED and S3_BUCKET:
@@ -178,97 +280,81 @@ def update_qualified_column(date_str=None):
             if not upload_to_s3(S3_BUCKET, s3_key, local_path):
                 logger.error("Failed to upload qualified data to S3")
                 return False
-            logger.info(f"Qualified data uploaded to S3: {s3_key}")
+            logger.info(f"8:37 qualification data uploaded to S3: {s3_key}")
         
-        # Get sample of qualified stocks for notification
-        qualified_stocks = df[df['qualified'].str.contains('True', na=False)].copy()
+        # Get qualified stocks for notification
+        qualified_stocks = df[df['qualified_8_37'] == True].copy()
         
-        sample_stocks = []
-        if not qualified_stocks.empty:
-            # Sort by market cap or volume for better sample
-            if 'intraday_market_cap_millions' in qualified_stocks.columns:
-                qualified_stocks = qualified_stocks.sort_values('intraday_market_cap_millions', ascending=False, na_last=True)
-            elif 'volume' in qualified_stocks.columns:
-                qualified_stocks = qualified_stocks.sort_values('volume', ascending=False, na_last=True)
-            
-            # Create sample list
-            sample_size = min(10, len(qualified_stocks))
-            
-            for _, stock in qualified_stocks.head(sample_size).iterrows():
-                symbol = stock.get('symbol', 'N/A')
-                current_price = stock.get('current_price', 0)
-                close = stock.get('close', 0)
-                volume = stock.get('volume', 0)
-                
-                # Calculate percentage change
-                pct_change = 0
-                if close and close > 0:
-                    try:
-                        pct_change = ((float(current_price) - float(close)) / float(close)) * 100
-                    except (ValueError, TypeError):
-                        pct_change = 0
-                
-                sample_stocks.append(f"{symbol}: +{pct_change:.1f}% (${current_price:.2f}), Vol: {int(volume):,}")
-        
-        # Send notification
-        time_status = "AFTER 8:50 AM" if after_qualification_time else "BEFORE 8:50 AM"
-        
+        # Prepare notification
         message = (
-            f"📊 QUALIFICATION UPDATE\n\n"
+            f"🎯 8:37 QUALIFICATION COMPLETE\n\n"
             f"Date: {date_str}\n"
-            f"Time: {current_time} CDT ({time_status})\n"
-            f"Total stocks: {total_count:,}\n"
-            f"Qualified (True): {true_count:,}\n"
-            f"Not Qualified (False): {false_count:,}\n"
-            f"Insufficient Data (N/A): {na_count:,}\n\n"
-            f"Criteria (applied only after 8:50 AM with complete data):\n"
-            f"✓ Volume > 300,000\n"
-            f"✓ Price change >= 2.5% from previous close\n"
-            f"✓ Previous close >= $0.01\n"
-            f"✓ Gap up (open > previous close)\n\n"
+            f"Time: {time_str} CDT\n"
+            f"Pre-filtered stocks: {len(df):,}\n"
+            f"Price data updated: {updated_count:,}\n"
+            f"QUALIFIED STOCKS: {qualified_count:,}\n\n"
+            f"Qualification Criteria:\n"
+            f"✓ Volume ≥ {MIN_VOLUME_MILLIONS}M shares\n"
+            f"✓ Price gain {MIN_PRICE_CHANGE_PCT}%-{MAX_PRICE_CHANGE_PCT}% from previous close\n"
+            f"✓ Current price > today's open\n\n"
         )
         
-        if true_count > 0:
-            message += f"🎯 QUALIFIED STOCKS:\n"
-            message += "\n".join(sample_stocks[:10])
-        elif after_qualification_time:
-            message += "⚠️ No stocks currently meet all qualification criteria"
+        if qualified_count > 0:
+            # Sort by price gain percentage
+            qualified_stocks['gain_pct'] = ((qualified_stocks['price_8_37'] - qualified_stocks['close']) / qualified_stocks['close']) * 100
+            qualified_stocks = qualified_stocks.sort_values('gain_pct', ascending=False)
+            
+            message += f"🏆 TOP QUALIFIED STOCKS:\n"
+            
+            sample_size = min(15, len(qualified_stocks))
+            for i, (_, stock) in enumerate(qualified_stocks.head(sample_size).iterrows(), 1):
+                symbol = stock.get('symbol', 'N/A')
+                price_837 = stock.get('price_8_37', 0)
+                gain_pct = stock.get('gain_pct', 0)
+                volume = stock.get('volume_8_37', 0) or stock.get('volume', 0)
+                
+                # Format volume
+                if volume >= 1_000_000:
+                    vol_str = f"{volume/1_000_000:.1f}M"
+                else:
+                    vol_str = f"{volume/1_000:.0f}K"
+                
+                message += f"{i:2d}. {symbol}: +{gain_pct:.1f}% (${price_837:.2f}), Vol: {vol_str}\n"
         else:
-            message += "ℹ️ Qualification pending until after 8:50 AM CDT"
+            message += "⚠️ No stocks met the 8:37 qualification criteria"
         
-        message += f"\n\n📁 File: stock_data/{date_str}/{local_path}"
+        message += f"\n📁 File: stock_data/{date_str}/{local_path}"
+        message += f"\n⏰ Next: 8:40 momentum check"
         
+        # Send notification
         if SNS_TOPIC_ARN:
-            if after_qualification_time:
-                subject = f"📊 Qualification Update - {true_count} qualified stocks"
-                if true_count == 0:
-                    subject = "⚠️ Qualification Update - No qualified stocks"
-            else:
-                subject = f"📊 Qualification Update - Pending (Before 8:50 AM)"
+            subject = f"🎯 8:37 Qualification - {qualified_count} stocks qualified"
+            if qualified_count == 0:
+                subject = "⚠️ 8:37 Qualification - No qualified stocks"
             
             send_sns_notification(SNS_TOPIC_ARN, subject, message)
         
         return True
         
     except Exception as e:
-        error_msg = f"Error updating qualified column: {str(e)}"
+        error_msg = f"Error in 8:37 qualification: {str(e)}"
         logger.error(error_msg)
         
         # Send error notification
         if SNS_TOPIC_ARN:
             send_sns_notification(
                 SNS_TOPIC_ARN,
-                "❌ Qualification Update Failed",
+                "❌ 8:37 Qualification Failed",
                 f"Error: {error_msg}\n"
                 f"Date: {date_str}\n"
-                f"Time: {get_time_str()} CDT"
+                f"Time: {time_str} CDT"
             )
         
         return False
 
-def get_qualified_symbols(date_str=None):
+def get_qualified_symbols_8_37(date_str=None):
     """
-    Get list of currently qualified symbol names (True status only).
+    Get list of symbols that qualified at 8:37
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
@@ -280,28 +366,37 @@ def get_qualified_symbols(date_str=None):
         date_str = get_date_str()
     
     try:
-        local_path = ensure_raw_data_exists(date_str, S3_BUCKET)
+        local_path = ensure_filtered_data_exists(date_str, S3_BUCKET)
         df = pd.read_csv(local_path)
         
-        if 'qualified' not in df.columns:
-            logger.warning("No qualified column found in raw data")
+        if 'qualified_8_37' not in df.columns:
+            logger.warning("No qualified_8_37 column found in filtered data")
             return []
         
         # Filter for qualified stocks (True status only)
-        qualified_mask = df['qualified'].str.contains('True', na=False)
+        qualified_mask = df['qualified_8_37'] == True
         qualified_stocks = df[qualified_mask]
         
         if 'symbol' in qualified_stocks.columns:
             symbols = qualified_stocks['symbol'].tolist()
-            logger.info(f"Found {len(symbols)} qualified symbols")
+            logger.info(f"Found {len(symbols)} stocks qualified at 8:37")
             return symbols
         else:
             logger.warning("No symbol column found in qualified data")
             return []
             
     except Exception as e:
-        logger.error(f"Error getting qualified symbols: {e}")
+        logger.error(f"Error getting 8:37 qualified symbols: {e}")
         return []
+
+# Legacy compatibility functions (updated to use new logic)
+def update_qualified_column(date_str=None):
+    """Legacy compatibility wrapper for run_8_37_qualification"""
+    return run_8_37_qualification(date_str)
+
+def get_qualified_symbols(date_str=None):
+    """Legacy compatibility wrapper for get_qualified_symbols_8_37"""
+    return get_qualified_symbols_8_37(date_str)
 
 if __name__ == "__main__":
     from config import setup_logging, validate_config
@@ -313,23 +408,29 @@ if __name__ == "__main__":
     
     # Parse command line arguments
     date_str = None
+    time_str = None
+    
     if len(sys.argv) > 1:
-        date_str = sys.argv[1]
-        if not re.match(r'^\d{8}$', date_str):
-            print("Invalid date format. Use YYYYMMDD")
-            exit(1)
+        if re.match(r'^\d{8}$', sys.argv[1]):
+            date_str = sys.argv[1]
+        elif re.match(r'^\d{2}:\d{2}$', sys.argv[1]):
+            time_str = sys.argv[1]
+    
+    if len(sys.argv) > 2:
+        if re.match(r'^\d{2}:\d{2}$', sys.argv[2]):
+            time_str = sys.argv[2]
     
     # Test the function
-    success = update_qualified_column(date_str)
+    success = run_8_37_qualification(date_str, time_str)
     if success:
         # Show qualified symbols
-        qualified = get_qualified_symbols(date_str)
-        print(f"✅ Qualification update completed successfully")
+        qualified = get_qualified_symbols_8_37(date_str)
+        print(f"✅ 8:37 qualification completed successfully")
         print(f"📊 {len(qualified)} stocks qualified")
         if qualified:
             print(f"🎯 Qualified symbols: {', '.join(qualified[:20])}")
             if len(qualified) > 20:
                 print(f"... and {len(qualified) - 20} more")
     else:
-        print("❌ Qualification update failed")
+        print("❌ 8:37 qualification failed")
         exit(1)

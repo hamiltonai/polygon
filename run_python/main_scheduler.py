@@ -5,9 +5,9 @@ from datetime import datetime
 import pytz
 from premarket_gainers import get_premarket_top_gainers
 from nasdaq_symbols import get_nasdaq_symbols
-from initial_data_pull import run_initial_data_pull
-from qualification_filter import update_qualified_column
-from intraday_updates import update_basic_intraday_data, update_full_intraday_data
+from initial_data_pull import run_prefiltered_data_pull, run_initial_data_pull
+from qualification_filter import run_8_37_qualification, get_qualified_symbols_8_37
+from intraday_updates import run_8_40_momentum_check, run_8_50_momentum_check, get_final_buy_symbols
 from config import setup_logging, validate_config, SNS_TOPIC_ARN
 from utils import get_date_str, send_sns_notification
 
@@ -15,8 +15,13 @@ logger = logging.getLogger(__name__)
 
 class PolygonWorkflowScheduler:
     """
-    Main scheduler for the Polygon stock data workflow.
-    Runs scheduled tasks and handles failures with SNS notifications.
+    Updated scheduler for the new Polygon stock workflow:
+    8:20 - Premarket gainers
+    8:22 - NASDAQ symbols  
+    8:25 - Pre-filtered data pull (previous day, market cap ≥$50M, price ≥$3)
+    8:37 - Qualification with current day data (volume ≥1M, gain 5-60%, price > open)
+    8:40 - Momentum check #1 (price > 8:37 price)
+    8:50 - Momentum check #2 + SNS buy list (price > 8:40 price)
     """
     
     def __init__(self):
@@ -25,28 +30,24 @@ class PolygonWorkflowScheduler:
         self.date_str = get_date_str()
         self.running = True
         
-        # IMPROVED SCHEDULE with proper timing logic
+        # NEW WORKFLOW SCHEDULE
         self.schedule = [
             # Pre-market data collection
-            ('08:24', self._run_premarket_gainers, 'Premarket Top Gainers', False),
-            ('08:27', self._run_nasdaq_symbols, 'NASDAQ Symbols Collection', False),
-            # Main data pull (CRITICAL - after 8:32 AM will pull "today" data)
-            ('08:37', self._run_initial_data_pull, 'Initial Data Pull', True),
-            # REMOVED: Early qualification step (would just set N/A before 8:50 AM)
-            # ('08:39', self._run_qualification_filter, 'Initial Qualification', True),
-            # Basic intraday updates (no qualification yet)
-            ('08:40', self._run_basic_intraday_update, 'Basic Intraday Update (08:40)', False),
-            # FIRST REAL QUALIFICATION at 8:50 AM (when qualification time starts)
-            ('08:50', self._run_first_qualification, 'First Qualification (08:50)', True),
-            # Full intraday updates with qualification
-            ('08:55', self._run_full_intraday_update, 'Full Intraday Update (08:55)', False),
-            ('09:00', self._run_full_intraday_update, 'Full Intraday Update (09:00)', False),
-            ('09:15', self._run_full_intraday_update, 'Full Intraday Update (09:15)', False),
-            ('09:30', self._run_full_intraday_update, 'Full Intraday Update (09:30)', False),
-            ('14:30', self._run_full_intraday_update, 'Full Intraday Update (14:30)', False),
+            ('08:20', self._run_premarket_gainers, 'Premarket Top Gainers', False),
+            ('08:22', self._run_nasdaq_symbols, 'NASDAQ Symbols Collection', False),
             
-            # Optional: End of day validation
-            ('15:35', self._run_end_of_day_validation, 'End of Day Validation', False),
+            # Pre-filtered data pull (CRITICAL - creates filtered dataset)
+            ('08:25', self._run_prefiltered_data_pull, 'Pre-filtered Data Pull (Previous Day)', True),
+            
+            # Main qualification with current day data (CRITICAL)
+            ('08:37', self._run_8_37_qualification, '8:37 Qualification (Current Day)', True),
+            
+            # Momentum checks
+            ('08:40', self._run_8_40_momentum_check, '8:40 Momentum Check', True),
+            ('08:50', self._run_8_50_momentum_check, '8:50 Final Momentum + SNS Buy List', True),
+            
+            # Optional: End of day summary
+            ('15:35', self._run_end_of_day_summary, 'End of Day Summary', False),
         ]
     
     def _run_premarket_gainers(self):
@@ -57,47 +58,34 @@ class PolygonWorkflowScheduler:
         """Run NASDAQ symbols collection"""
         return get_nasdaq_symbols(self.date_str)
     
-    def _run_initial_data_pull(self):
-        """Run initial data pull with time-based period selection"""
-        success = run_initial_data_pull(self.date_str)
-        
-        if success:
-            # Log what data period was used
-            current_time = datetime.now(self.cst).strftime('%H:%M')
-            if current_time >= '08:32':
-                data_period = "today"
-            else:
-                data_period = "previous"
-            logger.info(f"Initial data pull completed using '{data_period}' data period")
-        
-        return success
+    def _run_prefiltered_data_pull(self):
+        """Run 8:25 pre-filtered data pull (previous day data with filtering)"""
+        logger.info("Running 8:25 pre-filtered data pull - previous day data with market cap and price filters")
+        return run_prefiltered_data_pull(self.date_str)
     
-    def _run_first_qualification(self):
-        """Run FIRST qualification at 8:50 AM when qualification becomes active"""
-        logger.info("Running FIRST qualification at 8:50 AM - qualification now active")
-        return update_qualified_column(self.date_str)
-    
-    def _run_qualification_filter(self):
-        """Run qualification filter (standalone)"""
-        return update_qualified_column(self.date_str)
-    
-    def _run_basic_intraday_update(self):
-        """Run basic intraday update (price, volume, market cap only)"""
+    def _run_8_37_qualification(self):
+        """Run 8:37 qualification with current day data"""
+        logger.info("Running 8:37 qualification - current day data with volume/gain/momentum criteria")
         current_time = datetime.now(self.cst).strftime('%H:%M')
-        return update_basic_intraday_data(self.date_str, current_time)
+        return run_8_37_qualification(self.date_str, current_time)
     
-    def _run_full_intraday_update(self):
-        """Run full intraday update (price, volume, high, low, market cap)"""
+    def _run_8_40_momentum_check(self):
+        """Run 8:40 momentum check"""
+        logger.info("Running 8:40 momentum check - price must be above 8:37 price")
         current_time = datetime.now(self.cst).strftime('%H:%M')
-        return update_full_intraday_data(self.date_str, current_time)
+        return run_8_40_momentum_check(self.date_str, current_time)
     
-    def _run_end_of_day_validation(self):
-        """Run end of day validation and summary"""
+    def _run_8_50_momentum_check(self):
+        """Run 8:50 final momentum check and send buy list via SNS"""
+        logger.info("Running 8:50 final momentum check - price must be above 8:40 price + send SNS notification")
+        current_time = datetime.now(self.cst).strftime('%H:%M')
+        return run_8_50_momentum_check(self.date_str, current_time)
+    
+    def _run_end_of_day_summary(self):
+        """Run end of day summary"""
         try:
-            from qualification_filter import get_qualified_symbols
-            
-            qualified = get_qualified_symbols(self.date_str)
-            qualified_count = len(qualified)
+            buy_symbols = get_final_buy_symbols(self.date_str)
+            buy_count = len(buy_symbols)
             
             current_time = datetime.now(self.cst).strftime('%H:%M:%S')
             
@@ -105,34 +93,42 @@ class PolygonWorkflowScheduler:
                 f"📋 END OF DAY SUMMARY\n\n"
                 f"Date: {self.date_str}\n"
                 f"Time: {current_time} CDT\n"
-                f"Final qualified stocks: {qualified_count}\n\n"
+                f"Final buy list: {buy_count} stocks\n\n"
+                f"New Workflow Summary:\n"
+                f"✓ 8:20 - Premarket gainers collected\n"
+                f"✓ 8:22 - NASDAQ symbols updated\n"
+                f"✓ 8:25 - Pre-filtered data (market cap ≥$50M, price ≥$3)\n"
+                f"✓ 8:37 - Qualified stocks (volume ≥1M, gain 5-60%, price > open)\n"
+                f"✓ 8:40 - First momentum check (price > 8:37)\n"
+                f"✓ 8:50 - Final momentum check + SNS notification (price > 8:40)\n\n"
             )
             
-            if qualified_count > 0:
-                # Show top qualified stocks
-                sample_size = min(15, qualified_count)
-                summary += f"🎯 TOP {sample_size} QUALIFIED STOCKS:\n"
-                for i, symbol in enumerate(qualified[:sample_size], 1):
-                    summary += f"{i:2d}. {symbol}\n"
+            if buy_count > 0:
+                summary += f"🎯 FINAL BUY LIST ({buy_count} stocks):\n"
                 
-                if qualified_count > sample_size:
-                    summary += f"... and {qualified_count - sample_size} more\n"
+                # Show all buy symbols
+                symbols_per_line = 10
+                for i in range(0, len(buy_symbols), symbols_per_line):
+                    line_symbols = buy_symbols[i:i + symbols_per_line]
+                    summary += f"{', '.join(line_symbols)}\n"
+                
+                summary += f"\n📧 SNS notification sent with detailed buy list and analysis"
             else:
-                summary += "⚠️ No stocks qualified today\n"
+                summary += "⚠️ No stocks qualified for the buy list today\n"
             
-            summary += f"\n📁 Final file: stock_data/{self.date_str}/raw_data_{self.date_str}.csv"
+            summary += f"\n📁 Final file: stock_data/{self.date_str}/filtered_raw_data_{self.date_str}.csv"
             
-            logger.info(f"End of day validation: {qualified_count} qualified stocks")
+            logger.info(f"End of day summary: {buy_count} stocks in final buy list")
             
             # Send end of day notification
             if SNS_TOPIC_ARN:
-                subject = f"📋 End of Day Summary - {qualified_count} qualified stocks"
+                subject = f"📋 End of Day Summary - {buy_count} stocks in buy list"
                 send_sns_notification(SNS_TOPIC_ARN, subject, summary)
             
             return True
             
         except Exception as e:
-            logger.error(f"End of day validation failed: {e}")
+            logger.error(f"End of day summary failed: {e}")
             return False
     
     def _handle_critical_failure(self, step_name, error_msg):
@@ -145,6 +141,11 @@ class PolygonWorkflowScheduler:
             f"Error: {error_msg}\n\n"
             f"⚠️ Workflow has been STOPPED due to critical failure.\n"
             f"Manual intervention required to resolve the issue.\n\n"
+            f"New Workflow Dependencies:\n"
+            f"• 8:25 Pre-filtering is required for 8:37 qualification\n"
+            f"• 8:37 qualification is required for 8:40 momentum\n"
+            f"• 8:40 momentum is required for 8:50 final check\n"
+            f"• Each step depends on the previous step's success\n\n"
             f"Next steps:\n"
             f"1. Check logs for detailed error information\n"
             f"2. Resolve the underlying issue\n"
@@ -174,7 +175,7 @@ class PolygonWorkflowScheduler:
             f"Date: {self.date_str}\n"
             f"Time: {datetime.now(self.cst).strftime('%H:%M:%S')} CDT\n"
             f"Error: {error_msg}\n\n"
-            f"This is a non-critical step. Workflow will continue.\n"
+            f"This is a non-critical step. Core workflow can continue.\n"
             f"Manual review recommended when convenient."
         )
         
@@ -201,17 +202,18 @@ class PolygonWorkflowScheduler:
         # Send new day notification
         if SNS_TOPIC_ARN:
             new_day_msg = (
-                f"🌅 NEW DAY WORKFLOW STARTED\n\n"
+                f"🌅 NEW TRADING DAY STARTED\n\n"
                 f"Date: {self.date_str}\n"
                 f"Previous date: {old_date}\n"
                 f"Time: {datetime.now(self.cst).strftime('%H:%M:%S')} CDT\n\n"
-                f"Scheduler has been reset for the new trading day.\n"
-                f"Schedule improvements:\n"
-                f"✓ Removed early qualification (before 8:50 AM)\n"
-                f"✓ Added first qualification at 8:50 AM\n"
-                f"✓ Added end of day validation\n"
-                f"✓ Proper time-based data period handling\n\n"
-                f"All scheduled steps will run according to the daily schedule."
+                f"NEW WORKFLOW READY:\n"
+                f"🕐 8:20 - Premarket gainers\n"
+                f"🕐 8:22 - NASDAQ symbols\n"
+                f"🕐 8:25 - Pre-filtered data pull (market cap ≥$50M, price ≥$3)\n"
+                f"🕐 8:37 - Qualification (volume ≥1M, gain 5-60%, price > open)\n"
+                f"🕐 8:40 - Momentum check #1 (price > 8:37)\n"
+                f"🕐 8:50 - Final momentum + SNS notification (price > 8:40)\n\n"
+                f"All scheduled steps will run according to the new workflow."
             )
             
             send_sns_notification(
@@ -233,12 +235,15 @@ class PolygonWorkflowScheduler:
         step_mapping = {
             'premarket_gainers': self._run_premarket_gainers,
             'nasdaq_symbols': self._run_nasdaq_symbols,
-            'initial_data_pull': self._run_initial_data_pull,
-            'first_qualification': self._run_first_qualification,
-            'qualification_filter': self._run_qualification_filter,
-            'basic_intraday': self._run_basic_intraday_update,
-            'full_intraday': self._run_full_intraday_update,
-            'end_of_day_validation': self._run_end_of_day_validation,
+            'prefiltered_data_pull': self._run_prefiltered_data_pull,
+            '8_25': self._run_prefiltered_data_pull,  # Alias
+            '8_37_qualification': self._run_8_37_qualification,
+            '8_37': self._run_8_37_qualification,  # Alias
+            '8_40_momentum': self._run_8_40_momentum_check,
+            '8_40': self._run_8_40_momentum_check,  # Alias
+            '8_50_momentum': self._run_8_50_momentum_check,
+            '8_50': self._run_8_50_momentum_check,  # Alias
+            'end_of_day_summary': self._run_end_of_day_summary,
         }
         
         if step_name not in step_mapping:
@@ -260,67 +265,63 @@ class PolygonWorkflowScheduler:
             logger.error(f"❌ Step {step_name} failed with exception: {e}")
             return False
     
-    def validate_schedule_timing(self):
-        """Validate that the schedule timing makes sense"""
-        issues = []
+    def validate_workflow_dependencies(self):
+        """Validate that the workflow dependencies make sense"""
+        logger.info("Validating new workflow dependencies...")
         
-        # Check for timing conflicts with our new logic
-        for time_str, func, description, is_critical in self.schedule:
-            hour, minute = map(int, time_str.split(':'))
-            
-            # Check qualification timing
-            if 'qualification' in description.lower() and (hour < 8 or (hour == 8 and minute < 50)):
-                issues.append(f"⚠️ {description} at {time_str} runs before 8:50 AM qualification time")
-            
-            # Check data period timing
-            if 'initial data pull' in description.lower() and (hour > 8 or (hour == 8 and minute >= 32)):
-                logger.info(f"ℹ️ {description} at {time_str} will pull 'today' data (after 8:32 AM)")
-            elif 'initial data pull' in description.lower():
-                logger.info(f"ℹ️ {description} at {time_str} will pull 'previous' data (before 8:32 AM)")
+        dependencies = [
+            ("8:25 Pre-filtering", "Creates filtered dataset with market cap and price filters"),
+            ("8:37 Qualification", "Requires filtered dataset from 8:25"),
+            ("8:40 Momentum", "Requires qualified stocks from 8:37"),
+            ("8:50 Final + Email", "Requires momentum stocks from 8:40"),
+        ]
         
-        if issues:
-            logger.warning("Schedule timing issues detected:")
-            for issue in issues:
-                logger.warning(issue)
-        else:
-            logger.info("Schedule timing validation passed")
+        logger.info("Workflow dependency chain:")
+        for step, description in dependencies:
+            logger.info(f"  {step}: {description}")
         
-        return len(issues) == 0
+        # Check timing conflicts
+        critical_times = ["08:25", "08:37", "08:40", "08:50"]
+        logger.info(f"Critical timing windows: {', '.join(critical_times)}")
+        
+        logger.info("Workflow validation completed")
+        return True
     
     def run_schedule_loop(self):
         """
         Main scheduler loop. Runs continuously checking for scheduled tasks.
         """
-        logger.info("🚀 Starting IMPROVED Polygon stock data workflow scheduler")
+        logger.info("🚀 Starting NEW Polygon stock workflow scheduler")
         logger.info(f"Initial date: {self.date_str}")
         logger.info(f"Scheduled steps: {len(self.schedule)}")
         
-        # Validate schedule timing
-        self.validate_schedule_timing()
+        # Validate workflow
+        self.validate_workflow_dependencies()
         
         # Send startup notification
         if SNS_TOPIC_ARN:
             startup_msg = (
-                f"🚀 IMPROVED POLYGON WORKFLOW SCHEDULER STARTED\n\n"
+                f"🚀 NEW POLYGON WORKFLOW SCHEDULER STARTED\n\n"
                 f"Date: {self.date_str}\n"
                 f"Start time: {datetime.now(self.cst).strftime('%H:%M:%S')} CDT\n"
                 f"Scheduled steps: {len(self.schedule)}\n\n"
-                f"🔧 IMPROVEMENTS:\n"
-                f"✓ Removed early qualification (before 8:50 AM)\n"
-                f"✓ Added first qualification at 8:50 AM\n"
-                f"✓ Proper time-based data period handling\n"
-                f"✓ Added end of day validation\n"
-                f"✓ Schedule timing validation\n\n"
-                f"📅 SCHEDULE:\n"
+                f"🔄 NEW WORKFLOW:\n"
+                f"• 8:20 - Premarket gainers\n"
+                f"• 8:22 - NASDAQ symbols\n"
+                f"• 8:25 - Pre-filtered data (market cap ≥$50M, price ≥$3)\n"
+                f"• 8:37 - Qualification (volume ≥1M, gain 5-60%, price > open)\n"
+                f"• 8:40 - Momentum check #1 (price > 8:37)\n"
+                f"• 8:50 - Final momentum + SNS notification (price > 8:40)\n\n"
+                f"🎯 GOAL: SNS buy list notification at 8:50 with stocks that:\n"
+                f"✓ Pass pre-filtering criteria\n"
+                f"✓ Meet qualification thresholds\n"
+                f"✓ Maintain upward momentum\n\n"
+                f"📧 SNS notification will be sent automatically at 8:50"
             )
-            
-            for time_str, func, description, critical in self.schedule:
-                critical_marker = " (CRITICAL)" if critical else ""
-                startup_msg += f"• {time_str} - {description}{critical_marker}\n"
             
             send_sns_notification(
                 SNS_TOPIC_ARN,
-                f"🚀 Improved Workflow Scheduler Started - {self.date_str}",
+                f"🚀 New Workflow Scheduler Started - {self.date_str}",
                 startup_msg
             )
         
@@ -406,16 +407,15 @@ def main():
             print("Available steps:")
             print("  premarket_gainers - Collect premarket top gainers")
             print("  nasdaq_symbols - Collect NASDAQ symbols")
-            print("  initial_data_pull - Run initial data pull")
-            print("  first_qualification - Run first qualification (8:50 AM)")
-            print("  qualification_filter - Update qualification status")
-            print("  basic_intraday - Run basic intraday update")
-            print("  full_intraday - Run full intraday update")
-            print("  end_of_day_validation - Run end of day validation")
+            print("  prefiltered_data_pull (8_25) - Pre-filtered data pull")
+            print("  8_37_qualification (8_37) - Run 8:37 qualification")
+            print("  8_40_momentum (8_40) - Run 8:40 momentum check")
+            print("  8_50_momentum (8_50) - Run 8:50 momentum + SNS notification")
+            print("  end_of_day_summary - Run end of day summary")
             sys.exit(0)
         elif step_name == 'validate':
-            # Validate schedule timing
-            scheduler.validate_schedule_timing()
+            # Validate workflow
+            scheduler.validate_workflow_dependencies()
             sys.exit(0)
         else:
             # Run single step
@@ -433,7 +433,7 @@ def main():
             send_sns_notification(
                 SNS_TOPIC_ARN,
                 "🚨 FATAL SCHEDULER ERROR",
-                f"The workflow scheduler has crashed with a fatal error:\n\n{str(e)}\n\nImmediate attention required."
+                f"The new workflow scheduler has crashed with a fatal error:\n\n{str(e)}\n\nImmediate attention required."
             )
         
         sys.exit(1)

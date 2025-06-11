@@ -12,7 +12,8 @@ from polygon import RESTClient
 from config import (
     POLYGON_API_KEY, S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED,
     MAX_CONCURRENT_REQUESTS, REQUEST_TIMEOUT, BATCH_SIZE, 
-    MAX_RETRIES, RETRY_DELAY, BATCH_DELAY, MIN_COMPLETE_RATE
+    MAX_RETRIES, RETRY_DELAY, BATCH_DELAY, MIN_COMPLETE_RATE,
+    MIN_MARKET_CAP_MILLIONS, MIN_PREVIOUS_CLOSE
 )
 from utils import (
     get_date_str, upload_to_s3, download_from_s3, send_sns_notification,
@@ -112,6 +113,7 @@ async def get_stock_data(session, symbol, api_key, stats, period_info):
     market_cap = None
     shares_outstanding = None
     intraday_market_cap_millions = None
+    calculated_market_cap = None
     
     if isinstance(company_data, dict) and company_data.get('results'):
         result = company_data['results']
@@ -125,18 +127,24 @@ async def get_stock_data(session, symbol, api_key, stats, period_info):
         )
         
         current_price = stock_data.get('current_price')
+        
+        # Calculate market cap using current price and shares outstanding
         if shares_outstanding and current_price and shares_outstanding > 0:
-            intraday_market_cap_millions = (shares_outstanding * current_price) / 1_000_000
+            calculated_market_cap = (shares_outstanding * current_price) / 1_000_000
+            intraday_market_cap_millions = calculated_market_cap
         elif market_cap and current_price and current_price > 0:
-            estimated_shares = market_cap / current_price
+            # Use Polygon's market cap as fallback
             intraday_market_cap_millions = market_cap / 1_000_000
-            shares_outstanding = estimated_shares
+            calculated_market_cap = intraday_market_cap_millions
+            # Estimate shares from market cap
+            shares_outstanding = market_cap / current_price
     
     stock_data.update({
         'company_name': company_name,
         'market_cap': market_cap,
         'share_class_shares_outstanding': shares_outstanding,
         'intraday_market_cap_millions': intraday_market_cap_millions,
+        'calculated_market_cap': calculated_market_cap,  # NEW: This is our filtering field
     })
     
     # Calculate percentage change
@@ -170,6 +178,122 @@ def is_complete_record(stock_data):
     close = stock_data.get('close')
     
     if not (low <= open_price <= high and low <= close <= high):
+        return False
+    
+    return True
+
+def get_premarket_gainers_list(date_str):
+    """
+    Load premarket gainers list from local file or S3
+    
+    Args:
+        date_str: Date string (YYYYMMDD)
+        
+    Returns:
+        set: Set of symbols that were premarket top gainers, empty set if none found
+    """
+    gainers_filename = f"premarket_top_gainers_{date_str}.csv"
+    
+    # Try to download from S3 if not local
+    if not os.path.exists(gainers_filename) and S3_BUCKET:
+        try:
+            s3_key = f"stock_data/{date_str}/{gainers_filename}"
+            download_from_s3(S3_BUCKET, s3_key, gainers_filename)
+            logger.info(f"Downloaded {gainers_filename} from S3")
+        except Exception as e:
+            logger.debug(f"Could not download premarket gainers from S3: {e}")
+    
+    # Try to read the file
+    if os.path.exists(gainers_filename):
+        try:
+            df = pd.read_csv(gainers_filename)
+            
+            # Look for ticker/symbol column
+            symbol_col = None
+            for col in ['ticker', 'symbol', 'Ticker', 'Symbol']:
+                if col in df.columns:
+                    symbol_col = col
+                    break
+            
+            if symbol_col:
+                gainers = set(df[symbol_col].dropna().astype(str).str.strip().str.upper())
+                logger.info(f"Loaded {len(gainers)} premarket top gainers from {gainers_filename}")
+                return gainers
+            else:
+                logger.warning(f"No ticker/symbol column found in {gainers_filename}")
+                
+        except Exception as e:
+            logger.warning(f"Error reading premarket gainers file: {e}")
+    else:
+        logger.warning(f"Premarket gainers file not found: {gainers_filename}")
+    
+    return set()
+
+def add_top_gainer_flag(stock_data_list, premarket_gainers_set):
+    """
+    Add top_gainer flag to stock data
+    
+    Args:
+        stock_data_list: List of stock data dictionaries
+        premarket_gainers_set: Set of symbols that were premarket gainers
+        
+    Returns:
+        list: Updated stock data list with top_gainer column
+    """
+    for stock_data in stock_data_list:
+        symbol = stock_data.get('symbol', '').upper()
+        stock_data['top_gainer'] = symbol in premarket_gainers_set
+    
+    return stock_data_list
+
+def apply_prefilter(stock_data):
+    """
+    Apply pre-filtering criteria for 8:25 step:
+    - calculated_market_cap >= MIN_MARKET_CAP_MILLIONS (default: $50M)
+    - close >= MIN_PREVIOUS_CLOSE (default: $3.00)
+    
+    Args:
+        stock_data (dict): Stock data dictionary
+        
+    Returns:
+        bool: True if stock passes pre-filter, False otherwise
+    """
+    if not stock_data:
+        return False
+    
+    # Check market cap
+    calculated_market_cap = stock_data.get('calculated_market_cap')
+    if calculated_market_cap is None or calculated_market_cap < MIN_MARKET_CAP_MILLIONS:
+        return False
+    
+    # Check previous close price
+    close_price = stock_data.get('close')
+    if close_price is None or close_price < MIN_PREVIOUS_CLOSE:
+        return False
+    
+    return True
+    """
+    Apply pre-filtering criteria for 8:25 step:
+    - calculated_market_cap >= MIN_MARKET_CAP_MILLIONS (default: $50M)
+    - close >= MIN_PREVIOUS_CLOSE (default: $3.00)
+    
+    Args:
+        stock_data (dict): Stock data dictionary
+        
+    Returns:
+        bool: True if stock passes pre-filter, False otherwise
+    """
+    if not stock_data:
+        return False
+    
+    # Check market cap
+    calculated_market_cap = stock_data.get('calculated_market_cap')
+    if calculated_market_cap is None or calculated_market_cap < MIN_MARKET_CAP_MILLIONS:
+        return False
+    
+    # Check previous close price
+    close_price = stock_data.get('close')
+    if close_price is None or close_price < MIN_PREVIOUS_CLOSE:
         return False
     
     return True
@@ -300,17 +424,32 @@ def get_symbols_with_fallback():
         logger.error(f"Fallback symbol fetch failed: {e}")
         return []
 
-def run_initial_data_pull(date_str=None, max_symbols=None):
+def run_initial_data_pull(date_str=None, max_symbols=None, force_previous_day=False):
     """
-    Run initial data pull with time-based period selection
-    Before 8:32 AM CDT: pulls previous day data
-    After 8:32 AM CDT: pulls today's data
+    Run initial data pull with optional pre-filtering
+    
+    Args:
+        date_str: Date string for file naming
+        max_symbols: Limit number of symbols (for testing)
+        force_previous_day: Force previous day data regardless of time (for 8:25 step)
+    
+    Returns:
+        bool: True if successful, False otherwise
     """
     if not date_str:
         date_str = get_date_str()
     
     try:
-        period_info = get_data_period()
+        # Determine data period
+        if force_previous_day:
+            period_info = {
+                'data_period': 'previous',
+                'current_time_cst': get_current_cst_time().strftime('%H:%M:%S'),
+                'date_str': get_current_cst_time().strftime('%Y-%m-%d')
+            }
+        else:
+            period_info = get_data_period()
+        
         symbols = get_symbols_with_fallback()
         
         if not symbols:
@@ -350,23 +489,76 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
         if not all_complete_results:
             raise Exception("No complete records collected")
         
+        # Determine if we should apply pre-filtering (8:25 step)
+        current_time = period_info['current_time_cst']
+        is_prefilter_step = force_previous_day or current_time < "08:30"
+        
+        filtered_results = []
+        if is_prefilter_step:
+            # Load premarket gainers list for top_gainer flag
+            logger.info("Loading premarket gainers list for top_gainer flagging...")
+            premarket_gainers = get_premarket_gainers_list(date_str)
+            
+            if premarket_gainers:
+                logger.info(f"Found {len(premarket_gainers)} premarket top gainers")
+                
+                # Sample of gainers for logging
+                sample_gainers = list(premarket_gainers)[:10]
+                logger.info(f"Sample premarket gainers: {', '.join(sample_gainers)}")
+            else:
+                logger.warning("No premarket gainers found - all stocks will have top_gainer=False")
+            
+            # Add top_gainer flag to all stocks
+            all_complete_results = add_top_gainer_flag(all_complete_results, premarket_gainers)
+            
+            # Apply pre-filtering for 8:25 step
+            original_count = len(all_complete_results)
+            for stock_data in all_complete_results:
+                if apply_prefilter(stock_data):
+                    filtered_results.append(stock_data)
+            
+            # Count how many top gainers made it through pre-filtering
+            top_gainer_count = sum(1 for stock in filtered_results if stock.get('top_gainer', False))
+            
+            logger.info(f"Pre-filtering: {len(filtered_results)}/{original_count} stocks passed (Market cap ≥${MIN_MARKET_CAP_MILLIONS}M, Price ≥${MIN_PREVIOUS_CLOSE})")
+            logger.info(f"Top gainers in filtered dataset: {top_gainer_count}/{len(filtered_results)} stocks")
+            
+            final_results = filtered_results
+            filename = f"filtered_raw_data_{date_str}.csv"
+        else:
+            # No pre-filtering for later steps - don't add top_gainer column
+            final_results = all_complete_results
+            filename = f"raw_data_{date_str}.csv"
+        
+        if not final_results:
+            raise Exception("No stocks passed pre-filtering criteria")
+        
         # Write CSV
-        filename = f"raw_data_{date_str}.csv"
-        fieldnames = [
-            'symbol', 'company_name', 'data_period',
-            'open', 'high', 'low', 'close', 'volume', 
-            'current_price', 'avg_volume', 'market_cap', 'share_class_shares_outstanding',
-            'intraday_market_cap_millions', 'current_price_pct_change_from_open'
-        ]
+        if is_prefilter_step:
+            # Include top_gainer column for pre-filtered data
+            fieldnames = [
+                'symbol', 'company_name', 'data_period', 'top_gainer',
+                'open', 'high', 'low', 'close', 'volume', 
+                'current_price', 'avg_volume', 'market_cap', 'share_class_shares_outstanding',
+                'intraday_market_cap_millions', 'calculated_market_cap', 'current_price_pct_change_from_open'
+            ]
+        else:
+            # Standard fieldnames for non-pre-filtered data
+            fieldnames = [
+                'symbol', 'company_name', 'data_period',
+                'open', 'high', 'low', 'close', 'volume', 
+                'current_price', 'avg_volume', 'market_cap', 'share_class_shares_outstanding',
+                'intraday_market_cap_millions', 'calculated_market_cap', 'current_price_pct_change_from_open'
+            ]
         
         with open(filename, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             
-            # Sort by market cap descending
-            all_complete_results.sort(key=lambda x: -(x.get('intraday_market_cap_millions', 0) or 0))
+            # Sort by calculated market cap descending
+            final_results.sort(key=lambda x: -(x.get('calculated_market_cap', 0) or 0))
             
-            for row in all_complete_results:
+            for row in final_results:
                 output_row = {k: row.get(k) for k in fieldnames}
                 writer.writerow(output_row)
         
@@ -380,12 +572,20 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
         complete_rate = (stats['complete_records'] / stats['processed']) * 100 if stats['processed'] > 0 else 0
         symbols_per_second = len(symbols) / total_time
         
+        filter_info = ""
+        if is_prefilter_step:
+            top_gainer_count = sum(1 for stock in final_results if stock.get('top_gainer', False))
+            premarket_gainers_total = len(get_premarket_gainers_list(date_str))
+            
+            filter_info = f"\nPre-filtered: {len(final_results)}/{len(all_complete_results)} stocks\nCriteria: Market cap ≥${MIN_MARKET_CAP_MILLIONS}M, Price ≥${MIN_PREVIOUS_CLOSE}\nTop gainers in result: {top_gainer_count}/{len(final_results)} stocks\nTotal premarket gainers found: {premarket_gainers_total}"
+        
         summary = (
             f"✅ INITIAL DATA PULL COMPLETE\n\n"
             f"Period: {period_info['data_period'].upper()}\n"
             f"Time: {period_info['current_time_cst']} CDT\n"
             f"Symbols: {format_number(len(symbols))}\n"
-            f"Complete: {format_number(len(all_complete_results))} ({complete_rate:.1f}%)\n"
+            f"Complete: {format_number(len(all_complete_results))} ({complete_rate:.1f}%)"
+            f"{filter_info}\n"
             f"Duration: {format_duration(total_time)}\n"
             f"Speed: {symbols_per_second:.1f} symbols/sec\n"
             f"File: {filename}"
@@ -394,8 +594,21 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
         logger.info(summary)
         
         if SNS_TOPIC_ARN:
-            subject = f"✅ Data Pull Complete - {len(all_complete_results)} stocks ({period_info['data_period']})"
-            send_sns_notification(SNS_TOPIC_ARN, subject, summary)
+            step_type = "Pre-filtered" if is_prefilter_step else "Standard"
+            subject = f"✅ {step_type} Data Pull Complete - {len(final_results)} stocks ({period_info['data_period']})"
+            
+            # Add top gainers info to SNS if this is pre-filtering step
+            sns_message = summary
+            if is_prefilter_step:
+                top_gainers_in_result = [stock['symbol'] for stock in final_results if stock.get('top_gainer', False)]
+                if top_gainers_in_result:
+                    sns_message += f"\n\n🔥 PREMARKET TOP GAINERS IN FILTERED DATASET:\n{', '.join(top_gainers_in_result[:15])}"
+                    if len(top_gainers_in_result) > 15:
+                        sns_message += f"\n... and {len(top_gainers_in_result) - 15} more"
+                else:
+                    sns_message += f"\n\n⚠️ No premarket top gainers passed the pre-filtering criteria"
+            
+            send_sns_notification(SNS_TOPIC_ARN, subject, sns_message)
         
         return True
         
@@ -412,6 +625,20 @@ def run_initial_data_pull(date_str=None, max_symbols=None):
         
         return False
 
+def run_prefiltered_data_pull(date_str=None, max_symbols=None):
+    """
+    Run the 8:25 pre-filtered data pull (previous day data with filtering)
+    
+    Args:
+        date_str: Date string for file naming
+        max_symbols: Limit number of symbols (for testing)
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    logger.info("Running 8:25 pre-filtered data pull (previous day data)")
+    return run_initial_data_pull(date_str=date_str, max_symbols=max_symbols, force_previous_day=True)
+
 if __name__ == "__main__":
     from config import setup_logging, validate_config
     import sys
@@ -420,15 +647,40 @@ if __name__ == "__main__":
     validate_config()
     
     max_symbols = None
-    if len(sys.argv) > 1:
-        try:
-            max_symbols = int(sys.argv[1])
-        except ValueError:
-            pass
+    force_previous_day = False
     
-    success = run_initial_data_pull(max_symbols=max_symbols)
-    if success:
-        print("✅ Data pull completed")
+    # Parse command line arguments
+    for arg in sys.argv[1:]:
+        if arg == "--prefilter" or arg == "--8:25":
+            force_previous_day = True
+        elif arg.isdigit():
+            max_symbols = int(arg)
+    
+    if force_previous_day:
+        success = run_prefiltered_data_pull(max_symbols=max_symbols)
+        print("✅ Pre-filtered data pull completed" if success else "❌ Pre-filtered data pull failed")
+        
+        # Show top gainer info if successful
+        if success:
+            try:
+                import pandas as pd
+                filename = f"filtered_raw_data_{get_date_str()}.csv"
+                if os.path.exists(filename):
+                    df = pd.read_csv(filename)
+                    if 'top_gainer' in df.columns:
+                        top_gainer_count = df['top_gainer'].sum()
+                        print(f"📈 {top_gainer_count}/{len(df)} filtered stocks were premarket top gainers")
+                        
+                        if top_gainer_count > 0:
+                            top_gainers = df[df['top_gainer'] == True]['symbol'].tolist()
+                            print(f"🔥 Top gainers: {', '.join(top_gainers[:15])}")
+                            if len(top_gainers) > 15:
+                                print(f"... and {len(top_gainers) - 15} more")
+            except Exception as e:
+                pass  # Don't fail if we can't show the summary
     else:
-        print("❌ Data pull failed")
+        success = run_initial_data_pull(max_symbols=max_symbols)
+        print("✅ Data pull completed" if success else "❌ Data pull failed")
+    
+    if not success:
         exit(1)

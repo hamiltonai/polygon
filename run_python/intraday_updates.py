@@ -6,121 +6,62 @@ import logging
 import time
 from datetime import datetime
 import pytz
-from qualification_filter import (
-    ensure_raw_data_exists, get_qualified_symbols, 
-    is_after_qualification_time, has_required_data_for_qualification, calculate_qualification
+from config import (
+    POLYGON_API_KEY, S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED, REQUEST_TIMEOUT,
+    SEND_BUY_LIST_SNS
 )
-from config import POLYGON_API_KEY, S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED, REQUEST_TIMEOUT
 from utils import (
     get_date_str, get_time_str, upload_to_s3, send_sns_notification,
-    create_stats_counter, update_stats
+    format_buy_list_sns
 )
 
 logger = logging.getLogger(__name__)
 
-async def fetch_intraday_data(session, symbol, api_key):
-    """Fetch improved intraday data for a symbol using Polygon API"""
+def ensure_filtered_data_exists(date_str, s3_bucket):
+    """
+    Ensure filtered_raw_data_YYYYMMDD.csv exists locally.
+    Downloads from S3 if available, otherwise raises an error.
+    
+    Returns:
+        str: Local path to the filtered data file
+    """
+    from utils import download_from_s3
+    
+    filename = f"filtered_raw_data_{date_str}.csv"
+    s3_key = f"stock_data/{date_str}/{filename}"
+    
+    # Try to download from S3
+    if download_from_s3(s3_bucket, s3_key, filename):
+        logger.info(f"Downloaded {filename} from S3")
+        return filename
+    else:
+        raise FileNotFoundError(f"Filtered data file not found: {s3_key}")
+
+async def fetch_current_price_only(session, symbol, api_key):
+    """Fetch only current price for a symbol (optimized for momentum checks)"""
     headers = {"Authorization": f"Bearer {api_key}"}
-    
-    # Multiple endpoints for comprehensive data
-    endpoints = {
-        'last_trade': f"https://api.polygon.io/v2/last/trade/{symbol}",
-        'prev_day': f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev",
-        'company': f"https://api.polygon.io/v3/reference/tickers/{symbol}",
-        'snapshot': f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}"
-    }
-    
-    result = {
-        'symbol': symbol, 
-        'price': None, 
-        'volume': None, 
-        'high': None, 
-        'low': None, 
-        'shares_out': None,
-        'day_volume': None,
-        'day_high': None,
-        'day_low': None
-    }
+    url = f"https://api.polygon.io/v2/last/trade/{symbol}"
     
     try:
-        # Fetch last trade for current price (most important)
-        async with session.get(endpoints['last_trade'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
+        async with session.get(url, headers=headers, timeout=REQUEST_TIMEOUT) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('status') == 'OK' and data.get('results'):
-                    result['price'] = data['results'].get('p')
-        
-        # Fetch snapshot for comprehensive current day data
-        async with session.get(endpoints['snapshot'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('status') == 'OK' and data.get('results'):
-                    ticker_data = data['results']
-                    
-                    # Get today's trading data
-                    day_data = ticker_data.get('day', {})
-                    if day_data:
-                        result['day_volume'] = day_data.get('v')
-                        result['day_high'] = day_data.get('h')
-                        result['day_low'] = day_data.get('l')
-                        
-                        # Use snapshot price if we don't have last trade price
-                        if not result['price']:
-                            result['price'] = day_data.get('c')  # Current close from snapshot
-                    
-                    # Get last trade from snapshot as backup
-                    if not result['price']:
-                        last_trade = ticker_data.get('lastTrade', {})
-                        if last_trade:
-                            result['price'] = last_trade.get('p')
-        
-        # Fetch previous day aggregates for volume/high/low fallback
-        async with session.get(endpoints['prev_day'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('status') == 'OK' and data.get('results'):
-                    agg_data = data['results'][0]
-                    
-                    # Use as fallback if we don't have current day data
-                    if not result['volume']:
-                        result['volume'] = agg_data.get('v')
-                    if not result['high']:
-                        result['high'] = agg_data.get('h')
-                    if not result['low']:
-                        result['low'] = agg_data.get('l')
-        
-        # Fetch company data for shares outstanding (only if not already available)
-        async with session.get(endpoints['company'], headers=headers, timeout=REQUEST_TIMEOUT) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('status') == 'OK' and data.get('results'):
-                    company_data = data['results']
-                    
-                    # Try multiple fields for shares outstanding
-                    shares_out = (
-                        company_data.get('share_class_shares_outstanding') or
-                        company_data.get('weighted_shares_outstanding') or
-                        company_data.get('shares_outstanding')
-                    )
-                    result['shares_out'] = shares_out
-        
-        # Prioritize current day data over previous day data
-        if result['day_volume']:
-            result['volume'] = result['day_volume']
-        if result['day_high']:
-            result['high'] = result['day_high']
-        if result['day_low']:
-            result['low'] = result['day_low']
-        
-    except asyncio.TimeoutError:
-        logger.debug(f"Timeout fetching intraday data for {symbol}")
+                    price = data['results'].get('p')
+                    return {
+                        'symbol': symbol,
+                        'current_price': price
+                    }
     except Exception as e:
-        logger.debug(f"Error fetching intraday data for {symbol}: {e}")
+        logger.debug(f"Error fetching price for {symbol}: {e}")
     
-    return result
+    return {
+        'symbol': symbol,
+        'current_price': None
+    }
 
-async def fetch_batch_intraday_data(symbols, api_key, max_concurrent=50):
-    """Fetch intraday data for a batch of symbols with improved error handling"""
+async def fetch_batch_prices(symbols, api_key, max_concurrent=50):
+    """Fetch current prices for a batch of symbols"""
     if not symbols:
         return []
     
@@ -136,44 +77,35 @@ async def fetch_batch_intraday_data(symbols, api_key, max_concurrent=50):
     async with aiohttp.ClientSession(
         connector=connector, 
         timeout=timeout,
-        headers={'User-Agent': 'PolygonIntradayCollector/1.0'}
+        headers={'User-Agent': 'PolygonMomentumTracker/1.0'}
     ) as session:
-        # Process in smaller sub-batches to avoid overwhelming the API
-        sub_batch_size = min(25, len(symbols))
-        all_results = []
+        tasks = [fetch_current_price_only(session, symbol, api_key) for symbol in symbols]
         
-        for i in range(0, len(symbols), sub_batch_size):
-            sub_batch = symbols[i:i + sub_batch_size]
-            tasks = [fetch_intraday_data(session, symbol, api_key) for symbol in sub_batch]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            try:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Filter out exceptions and add valid results
-                for result in results:
-                    if isinstance(result, dict):
-                        all_results.append(result)
-                    else:
-                        logger.debug(f"Exception in batch fetch: {result}")
-                
-                # Small delay between sub-batches
-                if i + sub_batch_size < len(symbols):
-                    await asyncio.sleep(0.1)
-                    
-            except Exception as e:
-                logger.warning(f"Error processing sub-batch {i//sub_batch_size + 1}: {e}")
-        
-        return all_results
+            # Filter out exceptions and return valid results
+            valid_results = []
+            for result in results:
+                if isinstance(result, dict):
+                    valid_results.append(result)
+                else:
+                    logger.debug(f"Exception in batch fetch: {result}")
+            
+            return valid_results
+            
+        except Exception as e:
+            logger.warning(f"Error in batch fetch: {e}")
+            return []
 
-def update_intraday_data_and_qualified(date_str=None, time_str=None, include_high_low=True):
+def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
     """
-    Update raw data with intraday prices and volumes, recalculate qualified status with proper validation.
-    Only sets True/False after 8:50 AM CDT and when all required data is present.
+    Run momentum check at specified time (8:40 or 8:50)
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
-        time_str: Time string (HH:MM), defaults to current time
-        include_high_low: Whether to include high/low data (for full updates)
+        time_str: Time string (HH:MM), defaults to current time  
+        check_time: Which momentum check this is ("8:40" or "8:50")
         
     Returns:
         bool: True if successful, False otherwise
@@ -184,285 +116,203 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         time_str = get_time_str()
     
     try:
-        # Check if it's after qualification time
-        after_qualification_time = is_after_qualification_time()
+        # Ensure filtered data file exists
+        local_path = ensure_filtered_data_exists(date_str, S3_BUCKET)
         
-        # Ensure raw data file exists
-        local_path = ensure_raw_data_exists(date_str, S3_BUCKET)
-        
-        # Read the CSV
+        # Read the filtered CSV
         df = pd.read_csv(local_path)
         
         if df.empty:
-            logger.warning(f"Raw data file {local_path} is empty")
+            logger.warning(f"Filtered data file {local_path} is empty")
             return False
         
-        # Get all symbols that need updates (prioritize qualified symbols)
-        all_symbols = df['symbol'].tolist()
-        qualified_symbols = get_qualified_symbols(date_str)
+        # Determine previous price column and create new columns
+        if check_time == "8:40":
+            prev_price_col = 'price_8_37'
+            current_price_col = 'price_8_40'
+            momentum_col = 'momentum_8_40'
+            qualified_col = 'qualified_8_40'
+            
+            # Only check stocks that qualified at 8:37
+            if 'qualified_8_37' not in df.columns:
+                raise Exception("No 8:37 qualification data found. Run 8:37 qualification first.")
+            
+            symbols_to_check = df[df['qualified_8_37'] == True]['symbol'].tolist()
+            
+        elif check_time == "8:50":
+            prev_price_col = 'price_8_40'
+            current_price_col = 'price_8_50'
+            momentum_col = 'momentum_8_50'
+            qualified_col = 'qualified_8_50'
+            
+            # Only check stocks that maintained momentum at 8:40
+            if 'qualified_8_40' not in df.columns:
+                raise Exception("No 8:40 momentum data found. Run 8:40 momentum check first.")
+            
+            symbols_to_check = df[df['qualified_8_40'] == True]['symbol'].tolist()
+            
+        else:
+            raise ValueError("check_time must be '8:40' or '8:50'")
         
-        # Prioritize qualified symbols, but update all
-        priority_symbols = qualified_symbols + [s for s in all_symbols if s not in qualified_symbols]
+        if not symbols_to_check:
+            logger.warning(f"No symbols to check for {check_time} momentum")
+            # Still create columns but with N/A values
+            df[current_price_col] = np.nan
+            df[momentum_col] = False
+            df[qualified_col] = False
+            
+            # Save and return success
+            df.to_csv(local_path, index=False)
+            return True
         
-        logger.info(f"Updating intraday data for {len(priority_symbols)} symbols at {time_str}")
-        logger.info(f"After 8:50 AM qualification time? {after_qualification_time}")
-        if qualified_symbols:
-            logger.info(f"Prioritizing {len(qualified_symbols)} qualified symbols")
+        logger.info(f"Running {check_time} momentum check on {len(symbols_to_check)} symbols...")
         
-        # Fetch intraday data
+        # Fetch current prices
+        logger.info(f"Fetching current prices for {len(symbols_to_check)} symbols...")
         start_time = time.time()
-        intraday_data = asyncio.run(fetch_batch_intraday_data(priority_symbols, POLYGON_API_KEY))
+        current_data = asyncio.run(fetch_batch_prices(symbols_to_check, POLYGON_API_KEY))
         fetch_time = time.time() - start_time
         
-        logger.info(f"Fetched intraday data for {len(intraday_data)} symbols in {fetch_time:.1f}s")
+        logger.info(f"Fetched prices for {len(current_data)} symbols in {fetch_time:.1f}s")
         
         # Create mapping for quick lookup
-        data_map = {item['symbol']: item for item in intraday_data}
+        price_map = {item['symbol']: item['current_price'] for item in current_data}
         
-        # Prepare new column names
-        price_col = f'current_price_{time_str.replace(":", "")}'
-        pct_col = f'current_price_pct_change_from_open_{time_str.replace(":", "")}'
-        vol_col = f'current_volume_{time_str.replace(":", "")}'
-        mcap_col = f'intraday_market_cap_millions_{time_str.replace(":", "")}'
+        # Add new columns
+        df[current_price_col] = np.nan
+        df[momentum_col] = False
+        df[qualified_col] = False
         
-        if include_high_low:
-            high_col = f'high_{time_str.replace(":", "")}'
-            low_col = f'low_{time_str.replace(":", "")}'
+        # Update prices and check momentum
+        maintained_momentum = 0
+        updated_prices = 0
         
-        shares_col = 'share_class_shares_outstanding'
-        
-        # Add new columns to DataFrame
-        df[price_col] = np.nan
-        df[vol_col] = np.nan
-        df[mcap_col] = np.nan
-        df[pct_col] = np.nan
-        
-        if include_high_low:
-            df[high_col] = np.nan
-            df[low_col] = np.nan
-        
-        # Ensure shares outstanding column exists
-        if shares_col not in df.columns:
-            df[shares_col] = np.nan
-        
-        # Update data for each symbol
-        updated_count = 0
-        shares_updated_count = 0
-        
-        for symbol in priority_symbols:
-            symbol_data = data_map.get(symbol, {})
+        for idx, row in df.iterrows():
+            symbol = row['symbol']
             
-            if not symbol_data:
+            # Only process symbols we're checking
+            if symbol not in symbols_to_check:
                 continue
             
-            # Get the row index for this symbol
-            symbol_mask = df['symbol'] == symbol
-            if not symbol_mask.any():
+            # Get current price
+            current_price = price_map.get(symbol)
+            if current_price is None:
+                logger.debug(f"No current price for {symbol}")
                 continue
             
-            # Update price data
-            if symbol_data.get('price') is not None:
-                df.loc[symbol_mask, price_col] = symbol_data['price']
-                updated_count += 1
+            # Update current price
+            df.loc[idx, current_price_col] = current_price
+            updated_prices += 1
             
-            # Update volume
-            if symbol_data.get('volume') is not None:
-                df.loc[symbol_mask, vol_col] = symbol_data['volume']
+            # Get previous price for momentum comparison
+            prev_price = row.get(prev_price_col)
+            if pd.isna(prev_price) or prev_price is None:
+                logger.debug(f"No previous price for {symbol}")
+                continue
             
-            # Update high/low if requested
-            if include_high_low:
-                if symbol_data.get('high') is not None:
-                    df.loc[symbol_mask, high_col] = symbol_data['high']
-                if symbol_data.get('low') is not None:
-                    df.loc[symbol_mask, low_col] = symbol_data['low']
+            # Check momentum (current price > previous price)
+            has_momentum = current_price > prev_price
+            df.loc[idx, momentum_col] = has_momentum
             
-            # Update shares outstanding if available and not already set
-            if symbol_data.get('shares_out') is not None:
-                current_shares = df.loc[symbol_mask, shares_col].iloc[0]
-                if pd.isna(current_shares) or current_shares in [None, 'N/A', 0]:
-                    df.loc[symbol_mask, shares_col] = symbol_data['shares_out']
-                    shares_updated_count += 1
-        
-        logger.info(f"Updated price data for {updated_count} symbols")
-        if shares_updated_count > 0:
-            logger.info(f"Updated shares outstanding for {shares_updated_count} symbols")
-        
-        # Calculate percentage change from open and market cap
-        def calc_pct_change(row):
-            open_price = row.get('open')
-            current_price = row.get(price_col)
-            if pd.notna(open_price) and pd.notna(current_price) and open_price != 0:
-                return ((current_price - open_price) / open_price) * 100
-            return np.nan
-        
-        def calc_market_cap(row):
-            shares = row.get(shares_col)
-            price = row.get(price_col)
-            if pd.notna(shares) and pd.notna(price) and shares > 0:
-                return (shares * price) / 1_000_000
-            return np.nan
-        
-        # Apply calculations
-        df[pct_col] = df.apply(calc_pct_change, axis=1)
-        df[mcap_col] = df.apply(calc_market_cap, axis=1)
-        
-        # *** FIXED QUALIFICATION LOGIC ***
-        def apply_qualification_with_proper_validation(row):
-            """Apply qualification logic with time and data validation - FIXED VERSION"""
+            # Update qualification status
+            if check_time == "8:40":
+                # At 8:40, must have momentum AND be qualified at 8:37
+                was_qualified_837 = row.get('qualified_8_37', False)
+                is_qualified = was_qualified_837 and has_momentum
+            else:  # 8:50
+                # At 8:50, must have momentum AND be qualified at 8:40
+                was_qualified_840 = row.get('qualified_8_40', False)
+                is_qualified = was_qualified_840 and has_momentum
             
-            # If not after 8:50 AM, return N/A
-            if not after_qualification_time:
-                return f"[{time_str}] - N/A (Before 8:50 AM)"
+            df.loc[idx, qualified_col] = is_qualified
             
-            # Use current time data for qualification check
-            volume = row.get(vol_col, row.get('volume', 0))
-            current_price = row.get(price_col, row.get('current_price', 0))
-            close = row.get('close', 0)  # Previous close
-            open_price = row.get('open', 0)
-            
-            # Create temporary row with current data for qualification check
-            temp_row = {
-                'volume': volume,
-                'current_price': current_price,
-                'close': close,
-                'open': open_price,
-                'symbol': row.get('symbol', 'Unknown')
-            }
-            
-            # Check if we have all required data using the same logic as qualification_filter
-            if not has_required_data_for_qualification(temp_row):
-                return f"[{time_str}] - N/A (Missing Data)"
-            
-            # Calculate qualification using the same function as qualification_filter
-            is_qualified = calculate_qualification(temp_row)
-            
-            if is_qualified is None:
-                return f"[{time_str}] - N/A (Invalid Data)"
-            elif is_qualified:
-                return f"[{time_str}] - True"
-            else:
-                return f"[{time_str}] - False"
+            if is_qualified:
+                maintained_momentum += 1
         
-        # Update qualified column with proper validation
-        df['qualified'] = df.apply(apply_qualification_with_proper_validation, axis=1)
-        
-        # Count qualification results
-        true_count = df['qualified'].str.contains('True', na=False).sum()
-        false_count = df['qualified'].str.contains('False', na=False).sum()
-        na_count = df['qualified'].str.contains('N/A', na=False).sum()
-        total_count = len(df)
-        
-        # Count stocks with market cap data
-        mcap_count = df[mcap_col].notna().sum()
-        mcap_rate = (mcap_count / total_count) * 100 if total_count > 0 else 0
-        
-        logger.info(f"Qualification update: {true_count} qualified, {false_count} not qualified, {na_count} N/A")
-        logger.info(f"Market cap coverage: {mcap_count}/{total_count} stocks ({mcap_rate:.1f}%)")
+        logger.info(f"{check_time} momentum results: {maintained_momentum}/{len(symbols_to_check)} stocks maintained momentum")
+        logger.info(f"Updated price data for {updated_prices}/{len(symbols_to_check)} stocks")
         
         # Save updated CSV
         df.to_csv(local_path, index=False)
-        logger.info(f"Updated {local_path} with intraday data and qualification at {time_str}")
+        logger.info(f"Updated {local_path} with {check_time} momentum data")
         
         # Upload to S3
         if AWS_S3_ENABLED and S3_BUCKET:
             s3_key = f"stock_data/{date_str}/{local_path}"
             if not upload_to_s3(S3_BUCKET, s3_key, local_path):
-                logger.error("Failed to upload intraday data to S3")
+                logger.error("Failed to upload momentum data to S3")
                 return False
-            logger.info(f"Intraday data uploaded to S3: {s3_key}")
+            logger.info(f"{check_time} momentum data uploaded to S3: {s3_key}")
         
-        # Prepare notification with qualified stocks
-        newly_qualified = df[df['qualified'].str.contains('True', na=False)].copy()
-        
-        time_status = "AFTER 8:50 AM" if after_qualification_time else "BEFORE 8:50 AM"
+        # Prepare notification
+        if check_time == "8:40":
+            initial_qualified = df['qualified_8_37'].sum()
+        else:  # 8:50
+            initial_qualified = df['qualified_8_40'].sum()
         
         message = (
-            f"📈 INTRADAY UPDATE COMPLETE\n\n"
+            f"📈 {check_time.upper()} MOMENTUM CHECK COMPLETE\n\n"
             f"Date: {date_str}\n"
-            f"Time: {time_str} CDT ({time_status})\n"
-            f"Updated: {updated_count}/{len(priority_symbols)} symbols\n"
-            f"Qualified (True): {true_count:,}\n"
-            f"Not Qualified (False): {false_count:,}\n"
-            f"Insufficient Data (N/A): {na_count:,}\n"
-            f"Market cap coverage: {mcap_count:,} ({mcap_rate:.1f}%)\n"
-            f"Data fetch time: {fetch_time:.1f}s\n"
-            f"Shares data updated: {shares_updated_count} symbols\n\n"
+            f"Time: {time_str} CDT\n"
+            f"Symbols checked: {len(symbols_to_check):,}\n"
+            f"Price data updated: {updated_prices:,}\n"
+            f"MAINTAINED MOMENTUM: {maintained_momentum:,}/{initial_qualified:,}\n\n"
+            f"Momentum Criterion:\n"
+            f"✓ Current price > {prev_price_col.replace('_', ':')} price\n\n"
         )
         
-        if include_high_low:
-            message += f"📊 Updated columns: price, volume, high, low, market cap, % change, shares\n"
-        else:
-            message += f"📊 Updated columns: price, volume, market cap, % change, shares\n"
-        
-        if true_count > 0:
-            # Sort by percentage change or market cap
-            if pct_col in newly_qualified.columns:
-                newly_qualified = newly_qualified.sort_values(pct_col, ascending=False, na_position='last')
-            elif mcap_col in newly_qualified.columns:
-                newly_qualified = newly_qualified.sort_values(mcap_col, ascending=False, na_position='last')
+        if maintained_momentum > 0:
+            # Get stocks that maintained momentum
+            momentum_stocks = df[df[qualified_col] == True].copy()
             
-            message += f"\n🎯 QUALIFIED STOCKS:\n"
-            
-            sample_size = min(10, len(newly_qualified))
-            for _, stock in newly_qualified.head(sample_size).iterrows():
-                symbol = stock.get('symbol', 'N/A')
-                current_price = stock.get(price_col, stock.get('current_price', 0))
-                pct_change = stock.get(pct_col, 0)
-                volume = stock.get(vol_col, stock.get('volume', 0))
-                market_cap = stock.get(mcap_col, 0)
+            if not momentum_stocks.empty:
+                message += f"🚀 STOCKS WITH MOMENTUM:\n"
                 
-                # Format market cap
-                if pd.notna(market_cap) and market_cap > 0:
-                    if market_cap >= 1000:
-                        mcap_str = f"${market_cap/1000:.1f}B"
-                    else:
-                        mcap_str = f"${market_cap:.0f}M"
-                else:
-                    mcap_str = "N/A"
-                
-                # Format volume
-                if pd.notna(volume) and volume > 0:
-                    if volume >= 1_000_000:
-                        vol_str = f"{volume/1_000_000:.1f}M"
-                    elif volume >= 1_000:
-                        vol_str = f"{volume/1_000:.0f}K"
-                    else:
-                        vol_str = f"{int(volume):,}"
-                else:
-                    vol_str = "N/A"
-                
-                message += f"{symbol}: {pct_change:+.1f}% (${current_price:.2f}), Vol: {vol_str}, MCap: {mcap_str}\n"
-        elif after_qualification_time:
-            message += f"\n⚠️ No stocks currently meet qualification criteria"
+                sample_size = min(15, len(momentum_stocks))
+                for i, (_, stock) in enumerate(momentum_stocks.head(sample_size).iterrows(), 1):
+                    symbol = stock.get('symbol', 'N/A')
+                    current_price = stock.get(current_price_col, 0)
+                    prev_price = stock.get(prev_price_col, 0)
+                    
+                    # Calculate momentum percentage
+                    momentum_pct = 0
+                    if prev_price and prev_price > 0:
+                        momentum_pct = ((current_price - prev_price) / prev_price) * 100
+                    
+                    message += f"{i:2d}. {symbol}: ${prev_price:.2f} → ${current_price:.2f} (+{momentum_pct:.1f}%)\n"
         else:
-            message += f"\nℹ️ Qualification pending until after 8:50 AM CDT"
+            message += f"⚠️ No stocks maintained momentum at {check_time}"
         
         message += f"\n📁 File: stock_data/{date_str}/{local_path}"
-        message += f"\n✅ FIXED: Proper qualification time and data validation applied"
+        
+        if check_time == "8:50":
+            message += f"\n🎯 These are the FINAL BUY CANDIDATES!"
+            
+            # Send SNS notification for final buy list
+            if SEND_BUY_LIST_SNS and maintained_momentum > 0:
+                send_buy_list_sns(df, date_str, time_str)
+        else:
+            message += f"\n⏰ Next: 8:50 final momentum check"
         
         # Send notification
         if SNS_TOPIC_ARN:
-            data_type = "Full" if include_high_low else "Basic"
-            if after_qualification_time:
-                subject = f"📈 {data_type} Intraday Update - {true_count} qualified ({time_str})"
-                if true_count == 0:
-                    subject = f"⚠️ {data_type} Intraday Update - No qualified stocks ({time_str})"
-            else:
-                subject = f"📈 {data_type} Intraday Update - Qualification pending ({time_str})"
+            subject = f"📈 {check_time} Momentum - {maintained_momentum} stocks maintained"
+            if maintained_momentum == 0:
+                subject = f"⚠️ {check_time} Momentum - No stocks maintained"
             
             send_sns_notification(SNS_TOPIC_ARN, subject, message)
         
         return True
         
     except Exception as e:
-        error_msg = f"Error updating intraday data: {str(e)}"
+        error_msg = f"Error in {check_time} momentum check: {str(e)}"
         logger.error(error_msg)
         
         # Send error notification
         if SNS_TOPIC_ARN:
             send_sns_notification(
                 SNS_TOPIC_ARN,
-                f"❌ Intraday Update Failed ({time_str})",
+                f"❌ {check_time} Momentum Check Failed",
                 f"Error: {error_msg}\n"
                 f"Date: {date_str}\n"
                 f"Time: {time_str} CDT"
@@ -470,12 +320,132 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         
         return False
 
+def send_buy_list_sns(df, date_str, time_str):
+    """
+    Send final buy list via SNS notification
+    
+    Args:
+        df: DataFrame with all stock data
+        date_str: Date string
+        time_str: Time string
+    """
+    try:
+        # Get final qualified stocks (passed 8:50 momentum)
+        final_qualified = df[df.get('qualified_8_50', False) == True].copy()
+        
+        if final_qualified.empty:
+            logger.info("No stocks in final buy list - no SNS notification sent")
+            return False
+        
+        # Prepare summary stats
+        summary_stats = {
+            'total_analyzed': len(df),
+            'pre_filtered': len(df),  # This is already the pre-filtered dataset
+            'qualified_8_37': df.get('qualified_8_37', pd.Series()).sum(),
+            'maintained_8_40': df.get('qualified_8_40', pd.Series()).sum(),
+            'final_buy_list': len(final_qualified)
+        }
+        
+        # Convert to list of dictionaries for formatting
+        qualified_stocks = final_qualified.to_dict('records')
+        
+        # Format SNS message
+        subject, message_body = format_buy_list_sns(qualified_stocks, summary_stats, date_str, time_str)
+        
+        # Send SNS notification
+        success = send_sns_notification(SNS_TOPIC_ARN, subject, message_body)
+        
+        if success:
+            logger.info(f"✅ Buy list SNS notification sent successfully")
+            logger.info(f"📧 Subject: {subject}")
+            logger.info(f"📊 {len(qualified_stocks)} stocks in buy list")
+        else:
+            logger.error("❌ Failed to send buy list SNS notification")
+        
+        return success
+        
+    except Exception as e:
+        logger.error(f"Error sending buy list SNS: {e}")
+        return False
+
+def run_8_40_momentum_check(date_str=None, time_str=None):
+    """Run 8:40 momentum check"""
+    return run_momentum_check(date_str, time_str, "8:40")
+
+def run_8_50_momentum_check(date_str=None, time_str=None):
+    """Run 8:50 momentum check and send final buy list"""
+    return run_momentum_check(date_str, time_str, "8:50")
+
+def get_final_buy_list(date_str=None):
+    """
+    Get final buy list (stocks that passed all checks through 8:50)
+    
+    Args:
+        date_str: Date string (YYYYMMDD), defaults to today
+        
+    Returns:
+        list: List of qualified stock dictionaries, empty list if none or error
+    """
+    if not date_str:
+        date_str = get_date_str()
+    
+    try:
+        local_path = ensure_filtered_data_exists(date_str, S3_BUCKET)
+        df = pd.read_csv(local_path)
+        
+        if 'qualified_8_50' not in df.columns:
+            logger.warning("No qualified_8_50 column found - run 8:50 momentum check first")
+            return []
+        
+        # Filter for final qualified stocks
+        final_qualified = df[df['qualified_8_50'] == True]
+        
+        if final_qualified.empty:
+            logger.info("No stocks in final buy list")
+            return []
+        
+        # Convert to list of dictionaries
+        buy_list = final_qualified.to_dict('records')
+        
+        logger.info(f"Found {len(buy_list)} stocks in final buy list")
+        return buy_list
+        
+    except Exception as e:
+        logger.error(f"Error getting final buy list: {e}")
+        return []
+
+def get_final_buy_symbols(date_str=None):
+    """
+    Get final buy list symbols only
+    
+    Args:
+        date_str: Date string (YYYYMMDD), defaults to today
+        
+    Returns:
+        list: List of symbol strings, empty list if none or error
+    """
+    buy_list = get_final_buy_list(date_str)
+    return [stock.get('symbol', 'N/A') for stock in buy_list]
+
+# Legacy compatibility functions for backward compatibility
+def update_intraday_data_and_qualified(date_str=None, time_str=None, include_high_low=True):
+    """Legacy compatibility function - redirects to appropriate momentum check"""
+    current_time = time_str or get_time_str()
+    
+    if current_time == "08:40":
+        return run_8_40_momentum_check(date_str, time_str)
+    elif current_time == "08:50":
+        return run_8_50_momentum_check(date_str, time_str)
+    else:
+        logger.warning(f"No momentum check defined for time {current_time}")
+        return False
+
 def update_basic_intraday_data(date_str=None, time_str=None):
-    """Update with basic intraday data (price, volume, market cap only)"""
+    """Legacy compatibility wrapper"""
     return update_intraday_data_and_qualified(date_str, time_str, include_high_low=False)
 
 def update_full_intraday_data(date_str=None, time_str=None):
-    """Update with full intraday data (price, volume, high, low, market cap)"""
+    """Legacy compatibility wrapper"""
     return update_intraday_data_and_qualified(date_str, time_str, include_high_low=True)
 
 if __name__ == "__main__":
@@ -490,49 +460,49 @@ if __name__ == "__main__":
     # Parse command line arguments
     date_str = None
     time_str = None
-    update_type = "full"  # default
+    check_type = "8:40"  # default
     
-    if len(sys.argv) > 1:
-        if sys.argv[1] in ['basic', 'full']:
-            update_type = sys.argv[1]
-        elif re.match(r'^\d{8}$', sys.argv[1]):
-            date_str = sys.argv[1]
-        else:
-            print("Usage: python intraday_updates.py [basic|full] [YYYYMMDD] [HH:MM]")
-            sys.exit(1)
+    for arg in sys.argv[1:]:
+        if arg in ['8:40', '8:50']:
+            check_type = arg
+        elif re.match(r'^\d{8}$', arg):
+            date_str = arg
+        elif re.match(r'^\d{2}:\d{2}$', arg):
+            time_str = arg
     
-    if len(sys.argv) > 2:
-        if re.match(r'^\d{8}$', sys.argv[2]):
-            date_str = sys.argv[2]
-        elif re.match(r'^\d{2}:\d{2}$', sys.argv[2]):
-            time_str = sys.argv[2]
-    
-    if len(sys.argv) > 3:
-        if re.match(r'^\d{2}:\d{2}$', sys.argv[3]):
-            time_str = sys.argv[3]
-    
-    print(f"Running FIXED {update_type} intraday update...")
+    print(f"Running {check_type} momentum check...")
     if date_str:
         print(f"Date: {date_str}")
     if time_str:
         print(f"Time: {time_str}")
     
-    # Test the function
-    if update_type == "basic":
-        success = update_basic_intraday_data(date_str, time_str)
-    else:
-        success = update_full_intraday_data(date_str, time_str)
+    # Run the appropriate momentum check
+    if check_type == "8:40":
+        success = run_8_40_momentum_check(date_str, time_str)
+    else:  # 8:50
+        success = run_8_50_momentum_check(date_str, time_str)
     
     if success:
-        print(f"✅ FIXED {update_type.title()} intraday update completed successfully")
+        print(f"✅ {check_type} momentum check completed successfully")
         
-        # Show current qualified count
-        qualified = get_qualified_symbols(date_str)
-        print(f"📊 {len(qualified)} stocks currently qualified")
-        if qualified:
-            print(f"🎯 Sample qualified: {', '.join(qualified[:10])}")
-            if len(qualified) > 10:
-                print(f"... and {len(qualified) - 10} more")
+        # Show current status
+        if check_type == "8:40":
+            # Show 8:40 qualified count
+            try:
+                local_path = ensure_filtered_data_exists(date_str or get_date_str(), S3_BUCKET)
+                df = pd.read_csv(local_path)
+                qualified_840 = df['qualified_8_40'].sum() if 'qualified_8_40' in df.columns else 0
+                print(f"📊 {qualified_840} stocks maintained momentum at 8:40")
+            except:
+                pass
+        else:  # 8:50
+            # Show final buy list
+            buy_symbols = get_final_buy_symbols(date_str)
+            print(f"🎯 {len(buy_symbols)} stocks in FINAL BUY LIST")
+            if buy_symbols:
+                print(f"🚀 BUY: {', '.join(buy_symbols[:20])}")
+                if len(buy_symbols) > 20:
+                    print(f"... and {len(buy_symbols) - 20} more")
     else:
-        print(f"❌ {update_type.title()} intraday update failed")
+        print(f"❌ {check_type} momentum check failed")
         sys.exit(1)
