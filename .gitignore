@@ -1,3 +1,10 @@
+python/requirements.txt 
+.ipynb_checkpoints/
+.vscode/
+exported_stock_data/
+python_packages/
+
+
 # Environment Variables (CRITICAL - Never commit these!)
 .env
 .env.local

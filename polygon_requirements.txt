@@ -3,31 +3,67 @@
 
 ## Requirements
 
-This python app will take a list of nasdaq stocks and periodically add market data using
-polygon.io to update a csv on AWS s3. At a certain time of day, it will run analysis on 
-the qualifiers below to screen the stocks and alert the user using SNS on the filtered data.
+This Python app takes a list of NASDAQ stocks and periodically adds market data using
+polygon.io to update a CSV on AWS S3. At scheduled times, it runs analysis on the qualifiers below to screen the stocks and can alert the user using SNS on the filtered data.
 
-## Qualifying data
+## Environment variables:
 
-- volume > 300K
-- >= 2.5% from previous close
-- previous close >= $0.01
-- open > previous close
+- POLYGON_API_KEY
+- AWS_ACCESS_KEY_ID
+- AWS_SECRET_ACCESS_KEY
+- AWS_REGION
+- BUCKET_NAME
+- SNS_TOPIC_ARN
 
-As far as data I keep an eye on:
-- market cap
-- avg volume 
-- Latest quote info at given time intervals in cdt
-  - previous day close
-  - open
-  - 8:32
-  - 8:32
-  - 8:40
-  - 8:50
-  - 8:55
-  - 9:00
-  - 9:15
-  - 9:30
-  - 2:30
-- high of the day, but after the 8:50 am cdt timestamp
-- low of the day, but after the 8:50 am cdt timestamp
+## Logical Steps (as of latest logic)
+
+1. **08:25am CDT:** Get premarket top gainer data from polygon.io and add to a CSV on AWS S3: `/stock_data/YYYYMMDD/premarket_top_gainers_YYYYMMDD.csv`. Columns include ticker, change_percent, direction, share_class_shares_outstanding, and intraday_market_cap_millions.
+
+2. **08:30am CDT:** Get list of NASDAQ stocks from polygon.io (excluding warrants, ETFs, and other non-stock symbols) and save to `/stock_data/symbols/nasdaq_symbols_YYYYMMDD.csv` on S3. Only symbols of type 'CS' (Common Stock) and without '/' are included.
+
+3. **08:43am CDT:** Run initial data pull for all symbols, fetch and write to `/stock_data/YYYYMMDD/raw_data_YYYYMMDD.csv` with columns:
+   - symbol
+   - open
+   - close
+   - volume
+   - avg_volume
+   - current_price
+   - share_class_shares_outstanding (fetched from Polygon reference endpoint; only fetched if missing in later steps)
+   - intraday_market_cap_millions (calculated as shares_outstanding * current_price / 1,000,000)
+   - current_price_pct_change_from_open (calculated)
+
+4. **08:44am CDT:** Update the raw data CSV with a new column `qualified` (format: `[HH:MM] - True/False`) using the qualifiers:
+   - volume > 300K
+   - current price at 8:43 >= 2.5% from previous close
+   - close >= $0.01
+   - open > close
+
+5. **08:45am CDT:** Pull price and volume for each stock and append to the raw data CSV with new columns:
+   - current_price_HH:MM
+   - current_price_pct_change_from_open_HH:MM
+   - current_volume_HH:MM
+   - intraday_market_cap_millions_HH:MM
+   - (If share_class_shares_outstanding is missing, fetch and fill it; otherwise, keep the original value)
+   - Update the `qualified` column for this time
+
+6. **08:50, 08:55, 09:00, 09:15, 09:30, 14:30 CDT:** At each interval, pull price, volume, high, and low for each stock and append to the raw data CSV with new columns:
+   - current_price_HH:MM
+   - current_price_pct_change_from_open_HH:MM
+   - current_volume_HH:MM
+   - high_HH:MM
+   - low_HH:MM
+   - intraday_market_cap_millions_HH:MM
+   - (If share_class_shares_outstanding is missing, fetch and fill it; otherwise, keep the original value)
+   - Update the `qualified` column for this time
+
+7. **S3 Uploads:** After each step, the relevant CSV is uploaded to S3 in the appropriate folder. If a file does not exist locally, it is downloaded from S3 or created as needed.
+
+## Analysis and Display
+
+The raw data CSV is used to run analysis on the qualifiers to screen the stocks and alert the user using SNS on the filtered data (e.g., via a React app). The file is appended with new data at each scheduled interval. A new folder is created for each day, and the file is named `raw_data_YYYYMMDD.csv`.
+
+## Notes
+
+- `share_class_shares_outstanding` is fetched in the initial pull and only filled in later if missing; once set, it is not overwritten.
+- All time references are in America/Chicago (CST/CDT).
+- The logic is robust to missing data and will fallback to HTTP API calls if the Polygon client does not return all required fields.
