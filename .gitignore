@@ -1,6 +1,132 @@
-.env 
-python/requirements.txt 
-.ipynb_checkpoints/
+# Environment Variables (CRITICAL - Never commit these!)
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
+.env.test
+*.env
+.env.*
+
+# Python Environment
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+.ENV/
+
+# IDE and Editor Files
 .vscode/
-exported_stock_data/
-python_packages/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# Output and Data Files
+raw_data_*.csv
+nasdaq_symbols_*.csv
+premarket_top_gainers_*.csv
+stock_data_*.csv
+*.json
+*.xlsx
+*.xls
+
+# Logs
+*.log
+logs/
+log/
+
+# AWS and Cloud Credentials
+.aws/
+credentials
+config
+
+# API Keys and Secrets (Additional Protection)
+*key*
+*secret*
+*token*
+*password*
+*credentials*
+api_keys.txt
+secrets.txt
+
+# Temporary Files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Database Files
+*.db
+*.sqlite
+*.sqlite3
+
+# Coverage Reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Local Configuration
+local_settings.py
+local_config.py
+config_local.py
+
+# Operating System
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Backup Files
+*.bak
+*.backup
+*.old
+
+# Any file containing "local" in the name
+*local*
+
+# Test Files and Output
+test_output/
+test_data/
+*_test.csv
+*_debug.csv
