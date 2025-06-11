@@ -30,19 +30,14 @@ class PolygonWorkflowScheduler:
             # Pre-market data collection
             ('08:24', self._run_premarket_gainers, 'Premarket Top Gainers', False),
             ('08:27', self._run_nasdaq_symbols, 'NASDAQ Symbols Collection', False),
-            
             # Main data pull (CRITICAL - after 8:32 AM will pull "today" data)
-            ('08:35', self._run_initial_data_pull, 'Initial Data Pull', True),
-            
+            ('08:37', self._run_initial_data_pull, 'Initial Data Pull', True),
             # REMOVED: Early qualification step (would just set N/A before 8:50 AM)
             # ('08:39', self._run_qualification_filter, 'Initial Qualification', True),
-            
             # Basic intraday updates (no qualification yet)
-            ('08:45', self._run_basic_intraday_update, 'Basic Intraday Update (08:45)', False),
-            
+            ('08:40', self._run_basic_intraday_update, 'Basic Intraday Update (08:40)', False),
             # FIRST REAL QUALIFICATION at 8:50 AM (when qualification time starts)
             ('08:50', self._run_first_qualification, 'First Qualification (08:50)', True),
-            
             # Full intraday updates with qualification
             ('08:55', self._run_full_intraday_update, 'Full Intraday Update (08:55)', False),
             ('09:00', self._run_full_intraday_update, 'Full Intraday Update (09:00)', False),
