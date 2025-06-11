@@ -25,20 +25,33 @@ class PolygonWorkflowScheduler:
         self.date_str = get_date_str()
         self.running = True
         
-        # Define the schedule: (time_str, function, description, critical)
-        # critical=True means if it fails, stop the program
+        # IMPROVED SCHEDULE with proper timing logic
         self.schedule = [
+            # Pre-market data collection
             ('08:24', self._run_premarket_gainers, 'Premarket Top Gainers', False),
             ('08:27', self._run_nasdaq_symbols, 'NASDAQ Symbols Collection', False),
-            ('08:35', self._run_initial_data_pull, 'Initial Data Pull', True),  # Critical
-            ('08:39', self._run_qualification_filter, 'Initial Qualification', True),  # Critical
+            
+            # Main data pull (CRITICAL - after 8:32 AM will pull "today" data)
+            ('08:35', self._run_initial_data_pull, 'Initial Data Pull', True),
+            
+            # REMOVED: Early qualification step (would just set N/A before 8:50 AM)
+            # ('08:39', self._run_qualification_filter, 'Initial Qualification', True),
+            
+            # Basic intraday updates (no qualification yet)
             ('08:45', self._run_basic_intraday_update, 'Basic Intraday Update (08:45)', False),
-            ('08:50', self._run_full_intraday_update, 'Full Intraday Update (08:50)', False),
+            
+            # FIRST REAL QUALIFICATION at 8:50 AM (when qualification time starts)
+            ('08:50', self._run_first_qualification, 'First Qualification (08:50)', True),
+            
+            # Full intraday updates with qualification
             ('08:55', self._run_full_intraday_update, 'Full Intraday Update (08:55)', False),
             ('09:00', self._run_full_intraday_update, 'Full Intraday Update (09:00)', False),
             ('09:15', self._run_full_intraday_update, 'Full Intraday Update (09:15)', False),
             ('09:30', self._run_full_intraday_update, 'Full Intraday Update (09:30)', False),
             ('14:30', self._run_full_intraday_update, 'Full Intraday Update (14:30)', False),
+            
+            # Optional: End of day validation
+            ('15:35', self._run_end_of_day_validation, 'End of Day Validation', False),
         ]
     
     def _run_premarket_gainers(self):
@@ -50,22 +63,82 @@ class PolygonWorkflowScheduler:
         return get_nasdaq_symbols(self.date_str)
     
     def _run_initial_data_pull(self):
-        """Run initial data pull"""
-        return run_initial_data_pull(self.date_str)
+        """Run initial data pull with time-based period selection"""
+        success = run_initial_data_pull(self.date_str)
+        
+        if success:
+            # Log what data period was used
+            current_time = datetime.now(self.cst).strftime('%H:%M')
+            if current_time >= '08:32':
+                data_period = "today"
+            else:
+                data_period = "previous"
+            logger.info(f"Initial data pull completed using '{data_period}' data period")
+        
+        return success
+    
+    def _run_first_qualification(self):
+        """Run FIRST qualification at 8:50 AM when qualification becomes active"""
+        logger.info("Running FIRST qualification at 8:50 AM - qualification now active")
+        return update_qualified_column(self.date_str)
     
     def _run_qualification_filter(self):
-        """Run qualification filter"""
+        """Run qualification filter (standalone)"""
         return update_qualified_column(self.date_str)
     
     def _run_basic_intraday_update(self):
-        """Run basic intraday update"""
+        """Run basic intraday update (price, volume, market cap only)"""
         current_time = datetime.now(self.cst).strftime('%H:%M')
         return update_basic_intraday_data(self.date_str, current_time)
     
     def _run_full_intraday_update(self):
-        """Run full intraday update"""
+        """Run full intraday update (price, volume, high, low, market cap)"""
         current_time = datetime.now(self.cst).strftime('%H:%M')
         return update_full_intraday_data(self.date_str, current_time)
+    
+    def _run_end_of_day_validation(self):
+        """Run end of day validation and summary"""
+        try:
+            from qualification_filter import get_qualified_symbols
+            
+            qualified = get_qualified_symbols(self.date_str)
+            qualified_count = len(qualified)
+            
+            current_time = datetime.now(self.cst).strftime('%H:%M:%S')
+            
+            summary = (
+                f"📋 END OF DAY SUMMARY\n\n"
+                f"Date: {self.date_str}\n"
+                f"Time: {current_time} CDT\n"
+                f"Final qualified stocks: {qualified_count}\n\n"
+            )
+            
+            if qualified_count > 0:
+                # Show top qualified stocks
+                sample_size = min(15, qualified_count)
+                summary += f"🎯 TOP {sample_size} QUALIFIED STOCKS:\n"
+                for i, symbol in enumerate(qualified[:sample_size], 1):
+                    summary += f"{i:2d}. {symbol}\n"
+                
+                if qualified_count > sample_size:
+                    summary += f"... and {qualified_count - sample_size} more\n"
+            else:
+                summary += "⚠️ No stocks qualified today\n"
+            
+            summary += f"\n📁 Final file: stock_data/{self.date_str}/raw_data_{self.date_str}.csv"
+            
+            logger.info(f"End of day validation: {qualified_count} qualified stocks")
+            
+            # Send end of day notification
+            if SNS_TOPIC_ARN:
+                subject = f"📋 End of Day Summary - {qualified_count} qualified stocks"
+                send_sns_notification(SNS_TOPIC_ARN, subject, summary)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"End of day validation failed: {e}")
+            return False
     
     def _handle_critical_failure(self, step_name, error_msg):
         """Handle failure of a critical step"""
@@ -138,6 +211,11 @@ class PolygonWorkflowScheduler:
                 f"Previous date: {old_date}\n"
                 f"Time: {datetime.now(self.cst).strftime('%H:%M:%S')} CDT\n\n"
                 f"Scheduler has been reset for the new trading day.\n"
+                f"Schedule improvements:\n"
+                f"✓ Removed early qualification (before 8:50 AM)\n"
+                f"✓ Added first qualification at 8:50 AM\n"
+                f"✓ Added end of day validation\n"
+                f"✓ Proper time-based data period handling\n\n"
                 f"All scheduled steps will run according to the daily schedule."
             )
             
@@ -161,13 +239,17 @@ class PolygonWorkflowScheduler:
             'premarket_gainers': self._run_premarket_gainers,
             'nasdaq_symbols': self._run_nasdaq_symbols,
             'initial_data_pull': self._run_initial_data_pull,
+            'first_qualification': self._run_first_qualification,
             'qualification_filter': self._run_qualification_filter,
             'basic_intraday': self._run_basic_intraday_update,
             'full_intraday': self._run_full_intraday_update,
+            'end_of_day_validation': self._run_end_of_day_validation,
         }
         
         if step_name not in step_mapping:
             logger.error(f"Unknown step name: {step_name}")
+            available_steps = ', '.join(step_mapping.keys())
+            logger.error(f"Available steps: {available_steps}")
             return False
         
         logger.info(f"Manually running step: {step_name}")
@@ -183,22 +265,58 @@ class PolygonWorkflowScheduler:
             logger.error(f"❌ Step {step_name} failed with exception: {e}")
             return False
     
+    def validate_schedule_timing(self):
+        """Validate that the schedule timing makes sense"""
+        issues = []
+        
+        # Check for timing conflicts with our new logic
+        for time_str, func, description, is_critical in self.schedule:
+            hour, minute = map(int, time_str.split(':'))
+            
+            # Check qualification timing
+            if 'qualification' in description.lower() and (hour < 8 or (hour == 8 and minute < 50)):
+                issues.append(f"⚠️ {description} at {time_str} runs before 8:50 AM qualification time")
+            
+            # Check data period timing
+            if 'initial data pull' in description.lower() and (hour > 8 or (hour == 8 and minute >= 32)):
+                logger.info(f"ℹ️ {description} at {time_str} will pull 'today' data (after 8:32 AM)")
+            elif 'initial data pull' in description.lower():
+                logger.info(f"ℹ️ {description} at {time_str} will pull 'previous' data (before 8:32 AM)")
+        
+        if issues:
+            logger.warning("Schedule timing issues detected:")
+            for issue in issues:
+                logger.warning(issue)
+        else:
+            logger.info("Schedule timing validation passed")
+        
+        return len(issues) == 0
+    
     def run_schedule_loop(self):
         """
         Main scheduler loop. Runs continuously checking for scheduled tasks.
         """
-        logger.info("🚀 Starting Polygon stock data workflow scheduler")
+        logger.info("🚀 Starting IMPROVED Polygon stock data workflow scheduler")
         logger.info(f"Initial date: {self.date_str}")
         logger.info(f"Scheduled steps: {len(self.schedule)}")
+        
+        # Validate schedule timing
+        self.validate_schedule_timing()
         
         # Send startup notification
         if SNS_TOPIC_ARN:
             startup_msg = (
-                f"🚀 POLYGON WORKFLOW SCHEDULER STARTED\n\n"
+                f"🚀 IMPROVED POLYGON WORKFLOW SCHEDULER STARTED\n\n"
                 f"Date: {self.date_str}\n"
                 f"Start time: {datetime.now(self.cst).strftime('%H:%M:%S')} CDT\n"
                 f"Scheduled steps: {len(self.schedule)}\n\n"
-                f"Schedule:\n"
+                f"🔧 IMPROVEMENTS:\n"
+                f"✓ Removed early qualification (before 8:50 AM)\n"
+                f"✓ Added first qualification at 8:50 AM\n"
+                f"✓ Proper time-based data period handling\n"
+                f"✓ Added end of day validation\n"
+                f"✓ Schedule timing validation\n\n"
+                f"📅 SCHEDULE:\n"
             )
             
             for time_str, func, description, critical in self.schedule:
@@ -207,7 +325,7 @@ class PolygonWorkflowScheduler:
             
             send_sns_notification(
                 SNS_TOPIC_ARN,
-                f"🚀 Workflow Scheduler Started - {self.date_str}",
+                f"🚀 Improved Workflow Scheduler Started - {self.date_str}",
                 startup_msg
             )
         
@@ -294,9 +412,15 @@ def main():
             print("  premarket_gainers - Collect premarket top gainers")
             print("  nasdaq_symbols - Collect NASDAQ symbols")
             print("  initial_data_pull - Run initial data pull")
+            print("  first_qualification - Run first qualification (8:50 AM)")
             print("  qualification_filter - Update qualification status")
             print("  basic_intraday - Run basic intraday update")
             print("  full_intraday - Run full intraday update")
+            print("  end_of_day_validation - Run end of day validation")
+            sys.exit(0)
+        elif step_name == 'validate':
+            # Validate schedule timing
+            scheduler.validate_schedule_timing()
             sys.exit(0)
         else:
             # Run single step

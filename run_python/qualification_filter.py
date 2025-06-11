@@ -1,6 +1,8 @@
 import pandas as pd
 import logging
 import re
+from datetime import datetime
+import pytz
 from config import S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED
 from utils import (
     get_date_str, get_time_str, upload_to_s3, download_from_s3, 
@@ -8,6 +10,80 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+def is_after_qualification_time():
+    """Check if current Chicago time is after 8:50 AM"""
+    cst = pytz.timezone('America/Chicago')
+    now_cst = datetime.now(cst)
+    cutoff_time = now_cst.replace(hour=8, minute=50, second=0, microsecond=0)
+    
+    return now_cst >= cutoff_time
+
+def has_required_data_for_qualification(row):
+    """
+    Check if row has all required non-null data for qualification calculation
+    Required: volume, current_price, close (previous close), open
+    """
+    required_fields = ['volume', 'current_price', 'close', 'open']
+    
+    for field in required_fields:
+        value = row.get(field)
+        if value is None or value == '' or value == 'N/A':
+            return False
+        
+        # Check if it's a valid number
+        try:
+            float_val = float(value)
+            if float_val <= 0:  # All values should be positive
+                return False
+        except (ValueError, TypeError):
+            return False
+    
+    return True
+
+def calculate_qualification(row):
+    """
+    Check if a stock meets all qualifying criteria:
+    - volume > 300K
+    - current price >= 2.5% from previous close
+    - close >= $0.01
+    - open > close (gap up)
+    
+    Args:
+        row: DataFrame row with stock data
+        
+    Returns:
+        bool: True if qualified, False otherwise, None if data insufficient
+    """
+    try:
+        # Check if we have all required data
+        if not has_required_data_for_qualification(row):
+            return None
+        
+        # Get values and convert to float
+        volume = float(row.get('volume', 0))
+        close = float(row.get('close', 0))  # Previous close
+        open_price = float(row.get('open', 0))
+        current_price = float(row.get('current_price', 0))
+        
+        # Calculate percentage change from previous close
+        if close > 0:
+            pct_change = ((current_price - close) / close) * 100
+        else:
+            return None
+        
+        # Apply all criteria
+        criteria_met = (
+            volume > 300_000 and                    # Volume > 300K
+            pct_change >= 2.5 and                   # >= 2.5% from previous close
+            close >= 0.01 and                       # Previous close >= $0.01
+            open_price > close                       # Gap up (open > previous close)
+        )
+        
+        return criteria_met
+        
+    except (ValueError, TypeError):
+        return None
 
 def ensure_raw_data_exists(date_str, s3_bucket):
     """
@@ -27,49 +103,11 @@ def ensure_raw_data_exists(date_str, s3_bucket):
     else:
         raise FileNotFoundError(f"Raw data file not found: {s3_key}")
 
-def calculate_qualification(row):
-    """
-    Check if a stock meets all qualifying criteria:
-    - volume > 300K
-    - current price >= 2.5% from previous close
-    - close >= $0.01
-    - open > close (gap up)
-    
-    Args:
-        row: DataFrame row with stock data
-        
-    Returns:
-        bool: True if qualified, False otherwise
-    """
-    try:
-        # Get values and handle various formats
-        volume = float(row.get('volume', 0) or 0)
-        close = float(row.get('close', 0) or 0)  # Previous close
-        open_price = float(row.get('open', 0) or 0)
-        current_price = float(row.get('current_price', 0) or 0)
-        
-        # Calculate percentage change from previous close
-        if close > 0:
-            pct_change = ((current_price - close) / close) * 100
-        else:
-            pct_change = 0
-        
-        # Apply all criteria
-        criteria_met = (
-            volume > 300_000 and                    # Volume > 300K
-            pct_change >= 2.5 and                   # >= 2.5% from previous close
-            close >= 0.01 and                       # Previous close >= $0.01
-            open_price > close                       # Gap up (open > previous close)
-        )
-        
-        return criteria_met
-        
-    except (ValueError, TypeError):
-        return False
-
 def update_qualified_column(date_str=None):
     """
-    Update the raw_data CSV with a new 'qualified' column using the qualification criteria.
+    Update the raw_data CSV with qualified column.
+    Only sets True/False after 8:50 AM CDT and when all required data is present.
+    Otherwise sets 'N/A'.
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
@@ -81,6 +119,10 @@ def update_qualified_column(date_str=None):
         date_str = get_date_str()
     
     try:
+        # Check if it's after qualification time
+        after_qualification_time = is_after_qualification_time()
+        current_time = get_time_str()
+        
         # Ensure raw data file exists
         local_path = ensure_raw_data_exists(date_str, S3_BUCKET)
         
@@ -92,23 +134,39 @@ def update_qualified_column(date_str=None):
             return False
         
         logger.info(f"Processing {len(df)} stocks for qualification...")
-        
-        # Calculate qualification for each row
-        current_time = get_time_str()
+        logger.info(f"After 8:50 AM? {after_qualification_time}")
         
         def apply_qualification(row):
+            """Apply qualification logic with time and data checks"""
+            
+            # If not after 8:50 AM, return N/A
+            if not after_qualification_time:
+                return f"[{current_time}] - N/A (Before 8:50 AM)"
+            
+            # Check if we have all required data
+            if not has_required_data_for_qualification(row):
+                return f"[{current_time}] - N/A (Missing Data)"
+            
+            # Calculate qualification
             is_qualified = calculate_qualification(row)
-            return f"[{current_time}] - {'True' if is_qualified else 'False'}"
+            
+            if is_qualified is None:
+                return f"[{current_time}] - N/A (Invalid Data)"
+            elif is_qualified:
+                return f"[{current_time}] - True"
+            else:
+                return f"[{current_time}] - False"
         
         # Add or update the qualified column
         df['qualified'] = df.apply(apply_qualification, axis=1)
         
-        # Count qualified stocks
-        qualified_count = df['qualified'].str.contains('True').sum()
+        # Count different qualification statuses
+        true_count = df['qualified'].str.contains('True', na=False).sum()
+        false_count = df['qualified'].str.contains('False', na=False).sum()
+        na_count = df['qualified'].str.contains('N/A', na=False).sum()
         total_count = len(df)
-        qualified_rate = (qualified_count / total_count) * 100 if total_count > 0 else 0
         
-        logger.info(f"Qualification complete: {qualified_count}/{total_count} stocks qualified ({qualified_rate:.1f}%)")
+        logger.info(f"Qualification results: {true_count} qualified, {false_count} not qualified, {na_count} N/A")
         
         # Save updated CSV
         df.to_csv(local_path, index=False)
@@ -123,8 +181,9 @@ def update_qualified_column(date_str=None):
             logger.info(f"Qualified data uploaded to S3: {s3_key}")
         
         # Get sample of qualified stocks for notification
-        qualified_stocks = df[df['qualified'].str.contains('True')].copy()
+        qualified_stocks = df[df['qualified'].str.contains('True', na=False)].copy()
         
+        sample_stocks = []
         if not qualified_stocks.empty:
             # Sort by market cap or volume for better sample
             if 'intraday_market_cap_millions' in qualified_stocks.columns:
@@ -134,7 +193,6 @@ def update_qualified_column(date_str=None):
             
             # Create sample list
             sample_size = min(10, len(qualified_stocks))
-            sample_stocks = []
             
             for _, stock in qualified_stocks.head(sample_size).iterrows():
                 symbol = stock.get('symbol', 'N/A')
@@ -145,36 +203,48 @@ def update_qualified_column(date_str=None):
                 # Calculate percentage change
                 pct_change = 0
                 if close and close > 0:
-                    pct_change = ((current_price - close) / close) * 100
+                    try:
+                        pct_change = ((float(current_price) - float(close)) / float(close)) * 100
+                    except (ValueError, TypeError):
+                        pct_change = 0
                 
                 sample_stocks.append(f"{symbol}: +{pct_change:.1f}% (${current_price:.2f}), Vol: {int(volume):,}")
         
         # Send notification
+        time_status = "AFTER 8:50 AM" if after_qualification_time else "BEFORE 8:50 AM"
+        
         message = (
-            f"📊 STOCK QUALIFICATION UPDATE\n\n"
+            f"📊 QUALIFICATION UPDATE\n\n"
             f"Date: {date_str}\n"
-            f"Time: {current_time} CDT\n"
-            f"Total stocks processed: {total_count:,}\n"
-            f"Qualified stocks: {qualified_count:,} ({qualified_rate:.1f}%)\n\n"
-            f"Qualification Criteria:\n"
+            f"Time: {current_time} CDT ({time_status})\n"
+            f"Total stocks: {total_count:,}\n"
+            f"Qualified (True): {true_count:,}\n"
+            f"Not Qualified (False): {false_count:,}\n"
+            f"Insufficient Data (N/A): {na_count:,}\n\n"
+            f"Criteria (applied only after 8:50 AM with complete data):\n"
             f"✓ Volume > 300,000\n"
             f"✓ Price change >= 2.5% from previous close\n"
             f"✓ Previous close >= $0.01\n"
             f"✓ Gap up (open > previous close)\n\n"
         )
         
-        if qualified_count > 0:
-            message += f"🎯 TOP QUALIFIED STOCKS:\n"
+        if true_count > 0:
+            message += f"🎯 QUALIFIED STOCKS:\n"
             message += "\n".join(sample_stocks[:10])
-        else:
+        elif after_qualification_time:
             message += "⚠️ No stocks currently meet all qualification criteria"
+        else:
+            message += "ℹ️ Qualification pending until after 8:50 AM CDT"
         
-        message += f"\n\n📁 Updated file: stock_data/{date_str}/{local_path}"
+        message += f"\n\n📁 File: stock_data/{date_str}/{local_path}"
         
         if SNS_TOPIC_ARN:
-            subject = f"📊 Qualification Update - {qualified_count} qualified stocks"
-            if qualified_count == 0:
-                subject = "⚠️ Qualification Update - No qualified stocks"
+            if after_qualification_time:
+                subject = f"📊 Qualification Update - {true_count} qualified stocks"
+                if true_count == 0:
+                    subject = "⚠️ Qualification Update - No qualified stocks"
+            else:
+                subject = f"📊 Qualification Update - Pending (Before 8:50 AM)"
             
             send_sns_notification(SNS_TOPIC_ARN, subject, message)
         
@@ -198,7 +268,7 @@ def update_qualified_column(date_str=None):
 
 def get_qualified_symbols(date_str=None):
     """
-    Get list of currently qualified symbol names from the raw data file.
+    Get list of currently qualified symbol names (True status only).
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
@@ -217,7 +287,7 @@ def get_qualified_symbols(date_str=None):
             logger.warning("No qualified column found in raw data")
             return []
         
-        # Filter for qualified stocks
+        # Filter for qualified stocks (True status only)
         qualified_mask = df['qualified'].str.contains('True', na=False)
         qualified_stocks = df[qualified_mask]
         

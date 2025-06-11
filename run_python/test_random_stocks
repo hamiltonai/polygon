@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+"""
+Test Random Stocks Pipeline
+
+This script:
+1. Grabs 100 random stocks from symbols/raw_data
+2. Runs them through initial_data_pull 
+3. Applies qualification_filter
+4. Runs intraday_updates
+5. Shows detailed filtering analysis and column population
+
+Usage:
+    python test_random_stocks.py [--count 100] [--date YYYYMMDD] [--verbose]
+"""
+
+import os
+import pandas as pd
+import random
+import logging
+import argparse
+import sys
+import time
+from datetime import datetime
+import re
+
+# Import our modules
+from config import setup_logging, validate_config, S3_BUCKET
+from utils import get_date_str, get_time_str, download_from_s3
+from initial_data_pull import run_initial_data_pull
+from qualification_filter import update_qualified_column, calculate_qualification, get_qualified_symbols
+from intraday_updates import update_full_intraday_data
+
+logger = logging.getLogger(__name__)
+
+class StockTestPipeline:
+    """Pipeline to test random stocks through the complete workflow"""
+    
+    def __init__(self, count=100, date_str=None, verbose=False):
+        self.count = count
+        self.date_str = date_str or get_date_str()
+        self.verbose = verbose
+        self.test_symbols = []
+        self.results = {}
+        
+    def print_section(self, title, char="="):
+        """Print formatted section headers"""
+        print(f"\n{char * 80}")
+        print(f" {title}")
+        print(f"{char * 80}")
+    
+    def print_subsection(self, title):
+        """Print formatted subsection headers"""
+        print(f"\n{'-' * 60}")
+        print(f" {title}")
+        print(f"{'-' * 60}")
+    
+    def get_available_symbols(self):
+        """Get symbols from raw_data if exists, otherwise from symbols file"""
+        symbols = []
+        
+        # First try raw_data file (most recent)
+        raw_data_file = f"raw_data_{self.date_str}.csv"
+        
+        # Try to download from S3 first
+        if S3_BUCKET:
+            try:
+                s3_key = f"stock_data/{self.date_str}/{raw_data_file}"
+                if download_from_s3(S3_BUCKET, s3_key, raw_data_file):
+                    logger.info(f"Downloaded {raw_data_file} from S3")
+            except Exception as e:
+                logger.debug(f"Could not download raw_data from S3: {e}")
+        
+        # Try local raw_data file
+        if os.path.exists(raw_data_file):
+            try:
+                df = pd.read_csv(raw_data_file)
+                if 'symbol' in df.columns:
+                    symbols = df['symbol'].dropna().tolist()
+                    print(f"✅ Found {len(symbols)} symbols from {raw_data_file}")
+                    return symbols, "raw_data"
+            except Exception as e:
+                logger.warning(f"Error reading {raw_data_file}: {e}")
+        
+        # Try symbols file from S3
+        if S3_BUCKET:
+            try:
+                import boto3
+                s3 = boto3.client("s3")
+                prefix = "stock_data/symbols/"
+                response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
+                
+                if 'Contents' in response:
+                    files = [obj['Key'] for obj in response['Contents'] if obj['Key'].endswith('.csv')]
+                    date_pattern = re.compile(r'nasdaq_symbols_(\d{8})\.csv')
+                    latest_file = None
+                    latest_date = None
+                    
+                    for f in files:
+                        m = date_pattern.search(f)
+                        if m:
+                            file_date = m.group(1)
+                            if latest_date is None or file_date > latest_date:
+                                latest_date = file_date
+                                latest_file = f
+                    
+                    if latest_file:
+                        local_symbols_file = f"nasdaq_symbols_{latest_date}.csv"
+                        if download_from_s3(S3_BUCKET, latest_file, local_symbols_file):
+                            df = pd.read_csv(local_symbols_file)
+                            if 'symbol' in df.columns:
+                                symbols = df['symbol'].dropna().tolist()
+                                print(f"✅ Found {len(symbols)} symbols from S3: {latest_file}")
+                                return symbols, "symbols_s3"
+            except Exception as e:
+                logger.warning(f"Error getting symbols from S3: {e}")
+        
+        # Try local symbols files
+        for filename in os.listdir('.'):
+            if filename.startswith('nasdaq_symbols_') and filename.endswith('.csv'):
+                try:
+                    df = pd.read_csv(filename)
+                    if 'symbol' in df.columns:
+                        symbols = df['symbol'].dropna().tolist()
+                        print(f"✅ Found {len(symbols)} symbols from local file: {filename}")
+                        return symbols, "symbols_local"
+                except Exception as e:
+                    logger.warning(f"Error reading {filename}: {e}")
+        
+        raise Exception("No symbol source found! Run nasdaq_symbols.py or initial_data_pull.py first.")
+    
+    def select_random_symbols(self):
+        """Select random symbols for testing"""
+        self.print_section("📋 SYMBOL SELECTION")
+        
+        available_symbols, source = self.get_available_symbols()
+        
+        if len(available_symbols) < self.count:
+            print(f"⚠️ Only {len(available_symbols)} symbols available, using all of them")
+            self.test_symbols = available_symbols
+        else:
+            self.test_symbols = random.sample(available_symbols, self.count)
+        
+        print(f"📊 Selected {len(self.test_symbols)} random symbols from {source}")
+        print(f"🎲 Sample symbols: {', '.join(self.test_symbols[:10])}")
+        if len(self.test_symbols) > 10:
+            print(f"    ... and {len(self.test_symbols) - 10} more")
+        
+        return True
+    
+    def create_test_symbols_file(self):
+        """Create a temporary symbols file with our test symbols"""
+        test_symbols_file = f"test_symbols_{self.date_str}.csv"
+        
+        with open(test_symbols_file, 'w') as f:
+            f.write("symbol\n")
+            for symbol in self.test_symbols:
+                f.write(f"{symbol}\n")
+        
+        print(f"📁 Created test symbols file: {test_symbols_file}")
+        return test_symbols_file
+    
+    def run_initial_data_pull(self):
+        """Run initial data pull for test symbols"""
+        self.print_section("🔄 INITIAL DATA PULL")
+        
+        print(f"📥 Fetching initial data for {len(self.test_symbols)} symbols...")
+        print(f"⏱️  This may take a few minutes...")
+        
+        start_time = time.time()
+        
+        # Temporarily replace the symbol source to use our test symbols
+        # We'll modify the initial_data_pull to accept a custom symbol list
+        
+        # Store original function
+        from initial_data_pull import get_symbols_with_fallback
+        original_get_symbols = get_symbols_with_fallback
+        
+        # Replace with our test symbols
+        def test_get_symbols():
+            return self.test_symbols
+        
+        # Monkey patch
+        import initial_data_pull
+        initial_data_pull.get_symbols_with_fallback = test_get_symbols
+        
+        try:
+            success = run_initial_data_pull(self.date_str)
+            if success:
+                print(f"✅ Initial data pull completed in {time.time() - start_time:.1f}s")
+                self.results['initial_data_pull'] = True
+            else:
+                print("❌ Initial data pull failed")
+                self.results['initial_data_pull'] = False
+                return False
+        finally:
+            # Restore original function
+            initial_data_pull.get_symbols_with_fallback = original_get_symbols
+        
+        # Analyze the results
+        self.analyze_initial_data()
+        return True
+    
+    def analyze_initial_data(self):
+        """Analyze the initial data pull results"""
+        self.print_subsection("📊 Initial Data Analysis")
+        
+        raw_data_file = f"raw_data_{self.date_str}.csv"
+        
+        if not os.path.exists(raw_data_file):
+            print("❌ Raw data file not found!")
+            return
+        
+        df = pd.read_csv(raw_data_file)
+        
+        print(f"📈 Raw data summary:")
+        print(f"   Total records: {len(df)}")
+        print(f"   Columns: {', '.join(df.columns)}")
+        
+        # Check data completeness
+        essential_cols = ['symbol', 'open', 'high', 'low', 'close', 'volume', 'current_price']
+        missing_data = {}
+        
+        for col in essential_cols:
+            if col in df.columns:
+                missing_count = df[col].isnull().sum()
+                if missing_count > 0:
+                    missing_data[col] = missing_count
+        
+        if missing_data:
+            print(f"⚠️  Missing data:")
+            for col, count in missing_data.items():
+                print(f"   {col}: {count} missing ({count/len(df)*100:.1f}%)")
+        else:
+            print("✅ All essential columns have complete data")
+        
+        # Market cap analysis
+        if 'intraday_market_cap_millions' in df.columns:
+            mcap_available = df['intraday_market_cap_millions'].notna().sum()
+            print(f"💰 Market cap data: {mcap_available}/{len(df)} stocks ({mcap_available/len(df)*100:.1f}%)")
+        
+        # Shares outstanding analysis
+        if 'share_class_shares_outstanding' in df.columns:
+            shares_available = df['share_class_shares_outstanding'].notna().sum()
+            print(f"📊 Shares outstanding: {shares_available}/{len(df)} stocks ({shares_available/len(df)*100:.1f}%)")
+        
+        # Price range analysis
+        if 'current_price' in df.columns:
+            prices = df['current_price'].dropna()
+            if len(prices) > 0:
+                print(f"💵 Price range: ${prices.min():.2f} - ${prices.max():.2f} (avg: ${prices.mean():.2f})")
+        
+        self.results['initial_analysis'] = {
+            'total_records': len(df),
+            'missing_data': missing_data,
+            'mcap_coverage': mcap_available/len(df) if 'intraday_market_cap_millions' in df.columns else 0,
+            'shares_coverage': shares_available/len(df) if 'share_class_shares_outstanding' in df.columns else 0
+        }
+    
+    def run_qualification_filter(self):
+        """Run qualification filter and analyze results"""
+        self.print_section("🎯 QUALIFICATION FILTER")
+        
+        print(f"🔍 Applying qualification criteria...")
+        print(f"📋 Criteria:")
+        print(f"   • Volume > 300,000")
+        print(f"   • Price change >= 2.5% from previous close")
+        print(f"   • Previous close >= $0.01")
+        print(f"   • Gap up (open > previous close)")
+        
+        success = update_qualified_column(self.date_str)
+        
+        if not success:
+            print("❌ Qualification filter failed")
+            self.results['qualification_filter'] = False
+            return False
+        
+        print("✅ Qualification filter completed")
+        self.results['qualification_filter'] = True
+        
+        # Analyze qualification results
+        self.analyze_qualification_results()
+        return True
+    
+    def analyze_qualification_results(self):
+        """Detailed analysis of qualification results"""
+        self.print_subsection("🔍 Qualification Analysis")
+        
+        raw_data_file = f"raw_data_{self.date_str}.csv"
+        df = pd.read_csv(raw_data_file)
+        
+        if 'qualified' not in df.columns:
+            print("❌ No qualified column found!")
+            return
+        
+        # Count qualified vs unqualified
+        qualified_mask = df['qualified'].str.contains('True', na=False)
+        qualified_count = qualified_mask.sum()
+        total_count = len(df)
+        
+        print(f"🎯 Qualification Results:")
+        print(f"   Qualified: {qualified_count}/{total_count} ({qualified_count/total_count*100:.1f}%)")
+        print(f"   Unqualified: {total_count-qualified_count}/{total_count} ({(total_count-qualified_count)/total_count*100:.1f}%)")
+        
+        if qualified_count > 0:
+            qualified_stocks = df[qualified_mask].copy()
+            
+            self.print_subsection("✅ Qualified Stocks Analysis")
+            
+            # Sort by market cap or volume
+            if 'intraday_market_cap_millions' in qualified_stocks.columns:
+                qualified_stocks = qualified_stocks.sort_values('intraday_market_cap_millions', ascending=False, na_position='last')
+            elif 'volume' in qualified_stocks.columns:
+                qualified_stocks = qualified_stocks.sort_values('volume', ascending=False, na_position='last')
+            
+            print(f"🏆 Top qualified stocks:")
+            for i, (_, stock) in enumerate(qualified_stocks.head(10).iterrows(), 1):
+                symbol = stock.get('symbol', 'N/A')
+                current_price = stock.get('current_price', 0)
+                close = stock.get('close', 0)
+                open_price = stock.get('open', 0)
+                volume = stock.get('volume', 0)
+                
+                # Calculate percentage change
+                pct_change = 0
+                if close and close > 0:
+                    pct_change = ((current_price - close) / close) * 100
+                
+                # Format volume
+                if volume >= 1_000_000:
+                    vol_str = f"{volume/1_000_000:.1f}M"
+                elif volume >= 1_000:
+                    vol_str = f"{volume/1_000:.0f}K"
+                else:
+                    vol_str = f"{int(volume):,}"
+                
+                print(f"   {i:2d}. {symbol}: +{pct_change:.1f}% (${current_price:.2f}), Vol: {vol_str}")
+                
+                if self.verbose:
+                    gap_up = "Yes" if open_price > close else "No"
+                    print(f"       Open: ${open_price:.2f}, Close: ${close:.2f}, Gap up: {gap_up}")
+        
+        # Analyze why stocks were disqualified
+        if qualified_count < total_count:
+            self.print_subsection("❌ Disqualification Analysis")
+            unqualified_stocks = df[~qualified_mask].copy()
+            
+            disqualification_reasons = {
+                'volume_too_low': 0,
+                'change_too_small': 0,
+                'close_too_low': 0,
+                'no_gap_up': 0,
+                'multiple_reasons': 0
+            }
+            
+            print(f"🔍 Analyzing {len(unqualified_stocks)} unqualified stocks...")
+            
+            detailed_analysis = []
+            
+            for _, stock in unqualified_stocks.iterrows():
+                reasons = []
+                
+                volume = stock.get('volume', 0) or 0
+                close = stock.get('close', 0) or 0
+                open_price = stock.get('open', 0) or 0
+                current_price = stock.get('current_price', 0) or 0
+                
+                # Check each criterion
+                if volume <= 300_000:
+                    reasons.append('volume_too_low')
+                    disqualification_reasons['volume_too_low'] += 1
+                
+                if close > 0:
+                    pct_change = ((current_price - close) / close) * 100
+                    if pct_change < 2.5:
+                        reasons.append('change_too_small')
+                        disqualification_reasons['change_too_small'] += 1
+                
+                if close < 0.01:
+                    reasons.append('close_too_low')
+                    disqualification_reasons['close_too_low'] += 1
+                
+                if open_price <= close:
+                    reasons.append('no_gap_up')
+                    disqualification_reasons['no_gap_up'] += 1
+                
+                if len(reasons) > 1:
+                    disqualification_reasons['multiple_reasons'] += 1
+                
+                # Store for detailed output
+                if self.verbose and len(detailed_analysis) < 5:
+                    detailed_analysis.append({
+                        'symbol': stock.get('symbol', 'N/A'),
+                        'reasons': reasons,
+                        'volume': volume,
+                        'pct_change': pct_change if close > 0 else 0,
+                        'close': close,
+                        'open': open_price,
+                        'current_price': current_price
+                    })
+            
+            print(f"📊 Disqualification breakdown:")
+            for reason, count in disqualification_reasons.items():
+                if count > 0:
+                    print(f"   {reason.replace('_', ' ').title()}: {count} stocks ({count/len(unqualified_stocks)*100:.1f}%)")
+            
+            if self.verbose and detailed_analysis:
+                print(f"\n🔍 Sample disqualified stocks:")
+                for i, analysis in enumerate(detailed_analysis, 1):
+                    print(f"   {i}. {analysis['symbol']}:")
+                    print(f"      Volume: {analysis['volume']:,} (need >300K)")
+                    print(f"      Change: {analysis['pct_change']:+.2f}% (need >=2.5%)")
+                    print(f"      Close: ${analysis['close']:.2f} (need >=$0.01)")
+                    print(f"      Gap up: {'Yes' if analysis['open'] > analysis['close'] else 'No'} (need Yes)")
+                    print(f"      Reasons: {', '.join(analysis['reasons'])}")
+        
+        self.results['qualification_analysis'] = {
+            'qualified_count': qualified_count,
+            'total_count': total_count,
+            'qualification_rate': qualified_count/total_count if total_count > 0 else 0
+        }
+    
+    def run_intraday_updates(self):
+        """Run intraday updates and analyze results"""
+        self.print_section("📈 INTRADAY UPDATES")
+        
+        current_time = get_time_str()
+        print(f"🕐 Running intraday update at {current_time}")
+        
+        success = update_full_intraday_data(self.date_str, current_time)
+        
+        if not success:
+            print("❌ Intraday update failed")
+            self.results['intraday_updates'] = False
+            return False
+        
+        print("✅ Intraday update completed")
+        self.results['intraday_updates'] = True
+        
+        # Analyze intraday results
+        self.analyze_intraday_results()
+        return True
+    
+    def analyze_intraday_results(self):
+        """Analyze intraday update results"""
+        self.print_subsection("📊 Intraday Data Analysis")
+        
+        raw_data_file = f"raw_data_{self.date_str}.csv"
+        df = pd.read_csv(raw_data_file)
+        
+        # Find intraday columns (those with timestamps)
+        intraday_cols = [col for col in df.columns if re.search(r'_\d{4}$', col)]
+        
+        if intraday_cols:
+            print(f"📈 New intraday columns added: {len(intraday_cols)}")
+            for col in sorted(intraday_cols):
+                non_null_count = df[col].notna().sum()
+                print(f"   {col}: {non_null_count}/{len(df)} stocks ({non_null_count/len(df)*100:.1f}%)")
+        else:
+            print("⚠️ No intraday columns found")
+        
+        # Check if qualification changed after intraday update
+        if 'qualified' in df.columns:
+            qualified_mask = df['qualified'].str.contains('True', na=False)
+            new_qualified_count = qualified_mask.sum()
+            
+            prev_qualified_count = self.results.get('qualification_analysis', {}).get('qualified_count', 0)
+            
+            print(f"\n🎯 Qualification after intraday update:")
+            print(f"   Before: {prev_qualified_count} qualified")
+            print(f"   After: {new_qualified_count} qualified")
+            
+            if new_qualified_count != prev_qualified_count:
+                change = new_qualified_count - prev_qualified_count
+                print(f"   Change: {change:+d} stocks")
+            else:
+                print(f"   No change in qualification")
+        
+        self.results['intraday_analysis'] = {
+            'intraday_columns': len(intraday_cols),
+            'final_qualified_count': new_qualified_count if 'qualified' in df.columns else 0
+        }
+    
+    def show_final_analysis(self):
+        """Show comprehensive final analysis"""
+        self.print_section("📋 FINAL ANALYSIS")
+        
+        raw_data_file = f"raw_data_{self.date_str}.csv"
+        
+        if not os.path.exists(raw_data_file):
+            print("❌ Final data file not found!")
+            return
+        
+        df = pd.read_csv(raw_data_file)
+        
+        print(f"📊 Final Dataset Summary:")
+        print(f"   Total stocks processed: {len(df)}")
+        print(f"   Total columns: {len(df.columns)}")
+        
+        # Show all columns and their completeness
+        self.print_subsection("📋 Column Analysis")
+        
+        column_analysis = []
+        for col in df.columns:
+            non_null = df[col].notna().sum()
+            completeness = non_null / len(df) * 100
+            column_analysis.append((col, non_null, completeness))
+        
+        # Sort by completeness (descending)
+        column_analysis.sort(key=lambda x: x[2], reverse=True)
+        
+        print(f"{'Column':<40} {'Count':<8} {'Complete':<10}")
+        print("-" * 60)
+        for col, count, pct in column_analysis:
+            print(f"{col:<40} {count:<8} {pct:>7.1f}%")
+        
+        # Show qualified stocks with all their data
+        if 'qualified' in df.columns:
+            qualified_stocks = df[df['qualified'].str.contains('True', na=False)].copy()
+            
+            if len(qualified_stocks) > 0:
+                self.print_subsection("🏆 Final Qualified Stocks")
+                
+                # Sort by market cap or volume
+                if 'intraday_market_cap_millions' in qualified_stocks.columns:
+                    qualified_stocks = qualified_stocks.sort_values('intraday_market_cap_millions', ascending=False, na_position='last')
+                
+                # Show top 5 with all their data
+                print(f"Showing top {min(5, len(qualified_stocks))} qualified stocks with complete data:")
+                
+                for i, (_, stock) in enumerate(qualified_stocks.head(5).iterrows(), 1):
+                    print(f"\n{i}. {stock.get('symbol', 'N/A')} - {stock.get('company_name', 'N/A')}")
+                    
+                    # Essential data
+                    print(f"   Price: Open ${stock.get('open', 0):.2f} → Current ${stock.get('current_price', 0):.2f}")
+                    print(f"   Previous Close: ${stock.get('close', 0):.2f}")
+                    print(f"   Volume: {stock.get('volume', 0):,.0f}")
+                    
+                    # Market cap
+                    mcap = stock.get('intraday_market_cap_millions')
+                    if pd.notna(mcap):
+                        if mcap >= 1000:
+                            print(f"   Market Cap: ${mcap/1000:.1f}B")
+                        else:
+                            print(f"   Market Cap: ${mcap:.0f}M")
+                    
+                    # Calculate metrics
+                    open_price = stock.get('open', 0)
+                    close_price = stock.get('close', 0)
+                    current_price = stock.get('current_price', 0)
+                    volume = stock.get('volume', 0)
+                    
+                    if close_price > 0:
+                        pct_change = ((current_price - close_price) / close_price) * 100
+                        print(f"   Change from close: {pct_change:+.2f}%")
+                    
+                    gap_up = "Yes" if open_price > close_price else "No"
+                    print(f"   Gap up: {gap_up}")
+                    print(f"   Qualification: ✅ PASSED")
+        
+        # Pipeline success summary
+        self.print_subsection("🏁 Pipeline Results")
+        
+        pipeline_steps = [
+            ('Symbol Selection', True),
+            ('Initial Data Pull', self.results.get('initial_data_pull', False)),
+            ('Qualification Filter', self.results.get('qualification_filter', False)),
+            ('Intraday Updates', self.results.get('intraday_updates', False))
+        ]
+        
+        print("Pipeline step results:")
+        for step, success in pipeline_steps:
+            status = "✅ PASSED" if success else "❌ FAILED"
+            print(f"   {step:<20}: {status}")
+        
+        # Save analysis to file
+        analysis_file = f"test_analysis_{self.date_str}.txt"
+        self.save_analysis_to_file(analysis_file, df)
+        print(f"\n📁 Detailed analysis saved to: {analysis_file}")
+    
+    def save_analysis_to_file(self, filename, df):
+        """Save detailed analysis to a text file"""
+        with open(filename, 'w') as f:
+            f.write(f"Stock Pipeline Test Analysis\n")
+            f.write(f"Date: {self.date_str}\n")
+            f.write(f"Test symbols: {len(self.test_symbols)}\n")
+            f.write(f"Generated: {datetime.now()}\n")
+            f.write("=" * 80 + "\n\n")
+            
+            # Results summary
+            f.write("PIPELINE RESULTS:\n")
+            for key, value in self.results.items():
+                f.write(f"  {key}: {value}\n")
+            f.write("\n")
+            
+            # Column details
+            f.write("COLUMN ANALYSIS:\n")
+            for col in df.columns:
+                non_null = df[col].notna().sum()
+                completeness = non_null / len(df) * 100
+                f.write(f"  {col}: {non_null}/{len(df)} ({completeness:.1f}%)\n")
+            f.write("\n")
+            
+            # Qualified stocks details
+            if 'qualified' in df.columns:
+                qualified_stocks = df[df['qualified'].str.contains('True', na=False)]
+                f.write(f"QUALIFIED STOCKS ({len(qualified_stocks)}):\n")
+                
+                for _, stock in qualified_stocks.iterrows():
+                    f.write(f"  {stock.get('symbol', 'N/A')}: ")
+                    f.write(f"${stock.get('current_price', 0):.2f}, ")
+                    f.write(f"Vol: {stock.get('volume', 0):,.0f}, ")
+                    
+                    close = stock.get('close', 0)
+                    current = stock.get('current_price', 0)
+                    if close > 0:
+                        pct = ((current - close) / close) * 100
+                        f.write(f"Change: {pct:+.2f}%")
+                    f.write("\n")
+    
+    def run_complete_test(self):
+        """Run the complete test pipeline"""
+        print("🚀 Starting Random Stock Pipeline Test")
+        print(f"📅 Date: {self.date_str}")
+        print(f"🎲 Random stocks to test: {self.count}")
+        print(f"🔍 Verbose mode: {'ON' if self.verbose else 'OFF'}")
+        
+        start_time = time.time()
+        
+        try:
+            # Step 1: Select random symbols
+            if not self.select_random_symbols():
+                return False
+            
+            # Step 2: Run initial data pull
+            if not self.run_initial_data_pull():
+                return False
+            
+            # Step 3: Run qualification filter
+            if not self.run_qualification_filter():
+                return False
+            
+            # Step 4: Run intraday updates
+            if not self.run_intraday_updates():
+                return False
+            
+            # Step 5: Final analysis
+            self.show_final_analysis()
+            
+            total_time = time.time() - start_time
+            print(f"\n🏁 Pipeline completed successfully in {total_time:.1f} seconds")
+            
+            return True
+            
+        except Exception as e:
+            print(f"\n💥 Pipeline failed with error: {e}")
+            logger.error(f"Pipeline error: {e}", exc_info=True)
+            return False
+
+def main():
+    """Main function with argument parsing"""
+    parser = argparse.ArgumentParser(description='Test random stocks through the complete pipeline')
+    parser.add_argument('--count', type=int, default=100, help='Number of random stocks to test (default: 100)')
+    parser.add_argument('--date', type=str, help='Date string YYYYMMDD (default: today)')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+    
+    args = parser.parse_args()
+    
+    # Validate date format if provided
+    if args.date:
+        if not re.match(r'^\d{8}$', args.date):
+            print("❌ Invalid date format. Use YYYYMMDD")
+            sys.exit(1)
+    
+    # Setup logging
+    setup_logging()
+    
+    try:
+        validate_config()
+    except Exception as e:
+        print(f"❌ Configuration error: {e}")
+        sys.exit(1)
+    
+    # Run the test
+    pipeline = StockTestPipeline(
+        count=args.count,
+        date_str=args.date,
+        verbose=args.verbose
+    )
+    
+    success = pipeline.run_complete_test()
+    sys.exit(0 if success else 1)
+
+if __name__ == "__main__":
+    main()

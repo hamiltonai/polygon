@@ -4,7 +4,12 @@ import asyncio
 import aiohttp
 import logging
 import time
-from qualification_filter import ensure_raw_data_exists, calculate_qualification, get_qualified_symbols
+from datetime import datetime
+import pytz
+from qualification_filter import (
+    ensure_raw_data_exists, get_qualified_symbols, 
+    is_after_qualification_time, has_required_data_for_qualification, calculate_qualification
+)
 from config import POLYGON_API_KEY, S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED, REQUEST_TIMEOUT
 from utils import (
     get_date_str, get_time_str, upload_to_s3, send_sns_notification,
@@ -14,12 +19,7 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 async def fetch_intraday_data(session, symbol, api_key):
-    """
-    Fetch improved intraday data for a symbol using Polygon API.
-    
-    Returns:
-        dict: Contains price, volume, high, low, shares_out data
-    """
+    """Fetch improved intraday data for a symbol using Polygon API"""
     headers = {"Authorization": f"Bearer {api_key}"}
     
     # Multiple endpoints for comprehensive data
@@ -96,7 +96,7 @@ async def fetch_intraday_data(session, symbol, api_key):
                 if data.get('status') == 'OK' and data.get('results'):
                     company_data = data['results']
                     
-                    # IMPROVED: Try multiple fields for shares outstanding
+                    # Try multiple fields for shares outstanding
                     shares_out = (
                         company_data.get('share_class_shares_outstanding') or
                         company_data.get('weighted_shares_outstanding') or
@@ -167,7 +167,8 @@ async def fetch_batch_intraday_data(symbols, api_key, max_concurrent=50):
 
 def update_intraday_data_and_qualified(date_str=None, time_str=None, include_high_low=True):
     """
-    IMPROVED: Update raw data with intraday prices and volumes, recalculate qualified status.
+    Update raw data with intraday prices and volumes, recalculate qualified status with proper validation.
+    Only sets True/False after 8:50 AM CDT and when all required data is present.
     
     Args:
         date_str: Date string (YYYYMMDD), defaults to today
@@ -183,6 +184,9 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         time_str = get_time_str()
     
     try:
+        # Check if it's after qualification time
+        after_qualification_time = is_after_qualification_time()
+        
         # Ensure raw data file exists
         local_path = ensure_raw_data_exists(date_str, S3_BUCKET)
         
@@ -200,16 +204,17 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         # Prioritize qualified symbols, but update all
         priority_symbols = qualified_symbols + [s for s in all_symbols if s not in qualified_symbols]
         
-        logger.info(f"Updating IMPROVED intraday data for {len(priority_symbols)} symbols at {time_str}")
+        logger.info(f"Updating intraday data for {len(priority_symbols)} symbols at {time_str}")
+        logger.info(f"After 8:50 AM qualification time? {after_qualification_time}")
         if qualified_symbols:
             logger.info(f"Prioritizing {len(qualified_symbols)} qualified symbols")
         
-        # Fetch intraday data with improved logic
+        # Fetch intraday data
         start_time = time.time()
         intraday_data = asyncio.run(fetch_batch_intraday_data(priority_symbols, POLYGON_API_KEY))
         fetch_time = time.time() - start_time
         
-        logger.info(f"Fetched IMPROVED intraday data for {len(intraday_data)} symbols in {fetch_time:.1f}s")
+        logger.info(f"Fetched intraday data for {len(intraday_data)} symbols in {fetch_time:.1f}s")
         
         # Create mapping for quick lookup
         data_map = {item['symbol']: item for item in intraday_data}
@@ -240,7 +245,7 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         if shares_col not in df.columns:
             df[shares_col] = np.nan
         
-        # Update data for each symbol with improved logic
+        # Update data for each symbol
         updated_count = 0
         shares_updated_count = 0
         
@@ -271,7 +276,7 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
                 if symbol_data.get('low') is not None:
                     df.loc[symbol_mask, low_col] = symbol_data['low']
             
-            # IMPROVED: Update shares outstanding if available and not already set
+            # Update shares outstanding if available and not already set
             if symbol_data.get('shares_out') is not None:
                 current_shares = df.loc[symbol_mask, shares_col].iloc[0]
                 if pd.isna(current_shares) or current_shares in [None, 'N/A', 0]:
@@ -301,9 +306,15 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         df[pct_col] = df.apply(calc_pct_change, axis=1)
         df[mcap_col] = df.apply(calc_market_cap, axis=1)
         
-        # Update qualified column with new criteria using current time data
-        def apply_qualification_with_current_data(row):
-            # Use current time data for qualification
+        # *** FIXED QUALIFICATION LOGIC ***
+        def apply_qualification_with_proper_validation(row):
+            """Apply qualification logic with time and data validation - FIXED VERSION"""
+            
+            # If not after 8:50 AM, return N/A
+            if not after_qualification_time:
+                return f"[{time_str}] - N/A (Before 8:50 AM)"
+            
+            # Use current time data for qualification check
             volume = row.get(vol_col, row.get('volume', 0))
             current_price = row.get(price_col, row.get('current_price', 0))
             close = row.get('close', 0)  # Previous close
@@ -318,26 +329,39 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
                 'symbol': row.get('symbol', 'Unknown')
             }
             
+            # Check if we have all required data using the same logic as qualification_filter
+            if not has_required_data_for_qualification(temp_row):
+                return f"[{time_str}] - N/A (Missing Data)"
+            
+            # Calculate qualification using the same function as qualification_filter
             is_qualified = calculate_qualification(temp_row)
-            return f"[{time_str}] - {'True' if is_qualified else 'False'}"
+            
+            if is_qualified is None:
+                return f"[{time_str}] - N/A (Invalid Data)"
+            elif is_qualified:
+                return f"[{time_str}] - True"
+            else:
+                return f"[{time_str}] - False"
         
-        df['qualified'] = df.apply(apply_qualification_with_current_data, axis=1)
+        # Update qualified column with proper validation
+        df['qualified'] = df.apply(apply_qualification_with_proper_validation, axis=1)
         
-        # Count qualified stocks
-        qualified_count = df['qualified'].str.contains('True').sum()
+        # Count qualification results
+        true_count = df['qualified'].str.contains('True', na=False).sum()
+        false_count = df['qualified'].str.contains('False', na=False).sum()
+        na_count = df['qualified'].str.contains('N/A', na=False).sum()
         total_count = len(df)
-        qualified_rate = (qualified_count / total_count) * 100 if total_count > 0 else 0
         
         # Count stocks with market cap data
         mcap_count = df[mcap_col].notna().sum()
         mcap_rate = (mcap_count / total_count) * 100 if total_count > 0 else 0
         
-        logger.info(f"Qualification update: {qualified_count}/{total_count} stocks qualified ({qualified_rate:.1f}%)")
+        logger.info(f"Qualification update: {true_count} qualified, {false_count} not qualified, {na_count} N/A")
         logger.info(f"Market cap coverage: {mcap_count}/{total_count} stocks ({mcap_rate:.1f}%)")
         
         # Save updated CSV
         df.to_csv(local_path, index=False)
-        logger.info(f"Updated {local_path} with IMPROVED intraday data and qualification at {time_str}")
+        logger.info(f"Updated {local_path} with intraday data and qualification at {time_str}")
         
         # Upload to S3
         if AWS_S3_ENABLED and S3_BUCKET:
@@ -348,14 +372,18 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
             logger.info(f"Intraday data uploaded to S3: {s3_key}")
         
         # Prepare notification with qualified stocks
-        newly_qualified = df[df['qualified'].str.contains('True')].copy()
+        newly_qualified = df[df['qualified'].str.contains('True', na=False)].copy()
+        
+        time_status = "AFTER 8:50 AM" if after_qualification_time else "BEFORE 8:50 AM"
         
         message = (
-            f"📈 IMPROVED INTRADAY UPDATE COMPLETE\n\n"
+            f"📈 INTRADAY UPDATE COMPLETE\n\n"
             f"Date: {date_str}\n"
-            f"Time: {time_str} CDT\n"
+            f"Time: {time_str} CDT ({time_status})\n"
             f"Updated: {updated_count}/{len(priority_symbols)} symbols\n"
-            f"Qualified stocks: {qualified_count:,} ({qualified_rate:.1f}%)\n"
+            f"Qualified (True): {true_count:,}\n"
+            f"Not Qualified (False): {false_count:,}\n"
+            f"Insufficient Data (N/A): {na_count:,}\n"
             f"Market cap coverage: {mcap_count:,} ({mcap_rate:.1f}%)\n"
             f"Data fetch time: {fetch_time:.1f}s\n"
             f"Shares data updated: {shares_updated_count} symbols\n\n"
@@ -366,14 +394,14 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         else:
             message += f"📊 Updated columns: price, volume, market cap, % change, shares\n"
         
-        if qualified_count > 0:
-            # Sort by percentage change or market cap - FIXED: using na_position instead of na_last
+        if true_count > 0:
+            # Sort by percentage change or market cap
             if pct_col in newly_qualified.columns:
                 newly_qualified = newly_qualified.sort_values(pct_col, ascending=False, na_position='last')
             elif mcap_col in newly_qualified.columns:
                 newly_qualified = newly_qualified.sort_values(mcap_col, ascending=False, na_position='last')
             
-            message += f"\n🎯 TOP QUALIFIED STOCKS:\n"
+            message += f"\n🎯 QUALIFIED STOCKS:\n"
             
             sample_size = min(10, len(newly_qualified))
             for _, stock in newly_qualified.head(sample_size).iterrows():
@@ -404,18 +432,23 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
                     vol_str = "N/A"
                 
                 message += f"{symbol}: {pct_change:+.1f}% (${current_price:.2f}), Vol: {vol_str}, MCap: {mcap_str}\n"
-        else:
+        elif after_qualification_time:
             message += f"\n⚠️ No stocks currently meet qualification criteria"
+        else:
+            message += f"\nℹ️ Qualification pending until after 8:50 AM CDT"
         
         message += f"\n📁 File: stock_data/{date_str}/{local_path}"
-        message += f"\n✨ IMPROVEMENTS: Better API coverage, enhanced shares data, improved error handling"
+        message += f"\n✅ FIXED: Proper qualification time and data validation applied"
         
         # Send notification
         if SNS_TOPIC_ARN:
             data_type = "Full" if include_high_low else "Basic"
-            subject = f"📈 IMPROVED {data_type} Intraday Update - {qualified_count} qualified ({time_str})"
-            if qualified_count == 0:
-                subject = f"⚠️ IMPROVED {data_type} Intraday Update - No qualified stocks ({time_str})"
+            if after_qualification_time:
+                subject = f"📈 {data_type} Intraday Update - {true_count} qualified ({time_str})"
+                if true_count == 0:
+                    subject = f"⚠️ {data_type} Intraday Update - No qualified stocks ({time_str})"
+            else:
+                subject = f"📈 {data_type} Intraday Update - Qualification pending ({time_str})"
             
             send_sns_notification(SNS_TOPIC_ARN, subject, message)
         
@@ -438,29 +471,11 @@ def update_intraday_data_and_qualified(date_str=None, time_str=None, include_hig
         return False
 
 def update_basic_intraday_data(date_str=None, time_str=None):
-    """
-    Update with basic intraday data (price, volume, market cap only).
-    
-    Args:
-        date_str: Date string (YYYYMMDD), defaults to today
-        time_str: Time string (HH:MM), defaults to current time
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
+    """Update with basic intraday data (price, volume, market cap only)"""
     return update_intraday_data_and_qualified(date_str, time_str, include_high_low=False)
 
 def update_full_intraday_data(date_str=None, time_str=None):
-    """
-    Update with full intraday data (price, volume, high, low, market cap).
-    
-    Args:
-        date_str: Date string (YYYYMMDD), defaults to today
-        time_str: Time string (HH:MM), defaults to current time
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
+    """Update with full intraday data (price, volume, high, low, market cap)"""
     return update_intraday_data_and_qualified(date_str, time_str, include_high_low=True)
 
 if __name__ == "__main__":
@@ -496,7 +511,7 @@ if __name__ == "__main__":
         if re.match(r'^\d{2}:\d{2}$', sys.argv[3]):
             time_str = sys.argv[3]
     
-    print(f"Running IMPROVED {update_type} intraday update...")
+    print(f"Running FIXED {update_type} intraday update...")
     if date_str:
         print(f"Date: {date_str}")
     if time_str:
@@ -509,7 +524,7 @@ if __name__ == "__main__":
         success = update_full_intraday_data(date_str, time_str)
     
     if success:
-        print(f"✅ IMPROVED {update_type.title()} intraday update completed successfully")
+        print(f"✅ FIXED {update_type.title()} intraday update completed successfully")
         
         # Show current qualified count
         qualified = get_qualified_symbols(date_str)
