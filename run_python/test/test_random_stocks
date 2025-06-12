@@ -30,6 +30,8 @@ from initial_data_pull import run_initial_data_pull
 from qualification_filter import update_qualified_column, calculate_qualification, get_qualified_symbols
 from intraday_updates import update_full_intraday_data
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 logger = logging.getLogger(__name__)
 
 class StockTestPipeline:

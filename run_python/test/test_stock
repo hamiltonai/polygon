@@ -4,7 +4,9 @@ NVDA Polygon API Test Script
 Tests fetching open, previous close, market cap, and current price for NVIDIA (NVDA)
 """
 
+import sys
 import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import asyncio
 import aiohttp
 import json

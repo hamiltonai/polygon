@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""
+Enhanced Stock Symbol Finder
+Widens the search to find symbols across multiple exchanges and stock types
+"""
+
+import logging
+import time
+import csv
+import json
+from datetime import datetime
+from polygon import RESTClient
+from config import POLYGON_API_KEY
+from utils import get_date_str
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+logger = logging.getLogger(__name__)
+
+class StockSymbolFinder:
+    """Enhanced stock symbol finder with broader search capabilities"""
+    
+    def __init__(self, api_key, target_symbols=None):
+        self.api_key = api_key
+        self.client = RESTClient(api_key)
+        self.target_symbols = target_symbols or ['QSG', 'OUST', 'QUBT']
+        self.found_symbols = {}
+        self.all_symbols = []
+        
+    def get_search_configurations(self):
+        """Define different search configurations to try"""
+        return [
+            {
+                'name': 'NASDAQ_Common_Stocks',
+                'market': 'stocks',
+                'exchange': 'XNAS',
+                'type_filter': 'CS',
+                'active': True
+            },
+            {
+                'name': 'NYSE_Common_Stocks', 
+                'market': 'stocks',
+                'exchange': 'XNYS',
+                'type_filter': 'CS',
+                'active': True
+            },
+            {
+                'name': 'All_US_Stocks',
+                'market': 'stocks',
+                'exchange': None,
+                'type_filter': None,
+                'active': True
+            },
+            {
+                'name': 'All_Active_Securities',
+                'market': None,
+                'exchange': None, 
+                'type_filter': None,
+                'active': True
+            },
+            {
+                'name': 'All_Securities_Including_Inactive',
+                'market': None,
+                'exchange': None,
+                'type_filter': None,
+                'active': None
+            }
+        ]
+    
+    def search_with_config(self, config):
+        """Search for symbols using a specific configuration"""
+        print(f"\n🔍 Searching: {config['name']}")
+        
+        # Build search parameters
+        search_params = {'limit': 1000}
+        
+        if config['market']:
+            search_params['market'] = config['market']
+        if config['exchange']:
+            search_params['exchange'] = config['exchange']
+        if config['active'] is not None:
+            search_params['active'] = config['active']
+            
+        try:
+            symbols_found = []
+            target_found = []
+            page_count = 0
+            max_pages = 50  # Increased limit
+            
+            print(f"Parameters: {search_params}")
+            print("Processing: ", end="", flush=True)
+            
+            tickers_iter = self.client.list_tickers(**search_params)
+            
+            for ticker in tickers_iter:
+                # Apply type filter if specified
+                if config['type_filter'] and hasattr(ticker, 'type'):
+                    if ticker.type != config['type_filter']:
+                        continue
+                
+                symbol = ticker.ticker.strip().upper()
+                
+                # Store all symbols (less restrictive filtering)
+                if len(symbol) <= 8 and symbol.replace('.', '').replace('-', '').isalnum():
+                    ticker_info = {
+                        'symbol': symbol,
+                        'name': getattr(ticker, 'name', 'N/A'),
+                        'type': getattr(ticker, 'type', 'N/A'),
+                        'market': getattr(ticker, 'market', 'N/A'),
+                        'exchange': getattr(ticker, 'primary_exchange', 'N/A'),
+                        'active': getattr(ticker, 'active', 'N/A'),
+                        'currency': getattr(ticker, 'currency_name', 'N/A'),
+                        'search_config': config['name']
+                    }
+                    
+                    symbols_found.append(ticker_info)
+                    
+                    # Check if this is one of our target symbols
+                    if symbol in self.target_symbols:
+                        target_found.append(ticker_info)
+                        self.found_symbols[symbol] = ticker_info
+                        print(f"\n🎯 FOUND TARGET: {symbol}")
+                
+                # Progress indicator
+                if len(symbols_found) % 1000 == 0:
+                    print(".", end="", flush=True)
+                
+                page_count += 1
+                if page_count >= max_pages * 1000:
+                    print(f"\nReached limit for {config['name']}")
+                    break
+            
+            print(f"\n✅ {config['name']}: {len(symbols_found)} symbols, {len(target_found)} targets found")
+            
+            # Add to master list (avoid duplicates)
+            existing_symbols = {s['symbol'] for s in self.all_symbols}
+            new_symbols = [s for s in symbols_found if s['symbol'] not in existing_symbols]
+            self.all_symbols.extend(new_symbols)
+            
+            return symbols_found, target_found
+            
+        except Exception as e:
+            print(f"\n❌ Error in {config['name']}: {e}")
+            return [], []
+    
+    def quick_symbol_lookup(self, symbol):
+        """Quick lookup for a specific symbol"""
+        print(f"\n🔍 Quick lookup: {symbol}")
+        
+        try:
+            ticker_details = self.client.get_ticker_details(symbol)
+            
+            if ticker_details:
+                info = {
+                    'symbol': symbol,
+                    'name': getattr(ticker_details, 'name', 'N/A'),
+                    'type': getattr(ticker_details, 'type', 'N/A'),
+                    'market': getattr(ticker_details, 'market', 'N/A'),
+                    'exchange': getattr(ticker_details, 'primary_exchange', 'N/A'),
+                    'active': getattr(ticker_details, 'active', 'N/A'),
+                    'currency': getattr(ticker_details, 'currency_name', 'N/A'),
+                    'search_config': 'Direct_Lookup'
+                }
+                
+                print(f"✅ {symbol} found via direct lookup")
+                return info
+            else:
+                print(f"❌ {symbol} not found via direct lookup")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Direct lookup error for {symbol}: {e}")
+            return None
+    
+    def comprehensive_search(self):
+        """Run comprehensive search across all configurations"""
+        print("🚀 COMPREHENSIVE SYMBOL SEARCH")
+        print("=" * 60)
+        
+        start_time = time.time()
+        
+        # First try direct lookups for target symbols
+        print("\n📋 DIRECT SYMBOL LOOKUPS")
+        for symbol in self.target_symbols:
+            result = self.quick_symbol_lookup(symbol)
+            if result:
+                self.found_symbols[symbol] = result
+        
+        # Run searches with different configurations
+        print("\n🔍 SYSTEMATIC SEARCHES")
+        configs = self.get_search_configurations()
+        
+        for config in configs:
+            symbols_found, targets_found = self.search_with_config(config)
+            
+            # Stop early if we found all targets
+            if len(self.found_symbols) >= len(self.target_symbols):
+                print(f"\n🎉 All target symbols found! Stopping search.")
+                break
+        
+        search_time = time.time() - start_time
+        
+        # Summary
+        print(f"\n📊 SEARCH SUMMARY")
+        print("-" * 40)
+        print(f"Total symbols found: {len(self.all_symbols):,}")
+        print(f"Search time: {search_time:.1f} seconds")
+        print(f"Target symbols found: {len(self.found_symbols)}/{len(self.target_symbols)}")
+        
+        return self.found_symbols, self.all_symbols
+    
+    def show_target_results(self):
+        """Display detailed results for target symbols"""
+        print(f"\n🎯 TARGET SYMBOL RESULTS")
+        print("-" * 50)
+        
+        for symbol in self.target_symbols:
+            if symbol in self.found_symbols:
+                info = self.found_symbols[symbol]
+                print(f"✅ {symbol}: FOUND")
+                print(f"   Name: {info['name']}")
+                print(f"   Type: {info['type']}")
+                print(f"   Exchange: {info['exchange']}")
+                print(f"   Market: {info['market']}")
+                print(f"   Active: {info['active']}")
+                print(f"   Found via: {info['search_config']}")
+            else:
+                print(f"❌ {symbol}: NOT FOUND")
+            print()
+    
+    def export_results(self, date_str):
+        """Export search results to files"""
+        # Export all symbols
+        all_symbols_file = f"comprehensive_symbols_{date_str}.csv"
+        
+        with open(all_symbols_file, 'w', newline='') as f:
+            if self.all_symbols:
+                fieldnames = self.all_symbols[0].keys()
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.all_symbols)
+        
+        # Export target results
+        target_results_file = f"target_symbol_results_{date_str}.json"
+        
+        results_data = {
+            'search_date': date_str,
+            'search_time': datetime.now().isoformat(),
+            'target_symbols': self.target_symbols,
+            'found_symbols': self.found_symbols,
+            'total_symbols_found': len(self.all_symbols),
+            'target_found_count': len(self.found_symbols),
+            'success_rate': (len(self.found_symbols) / len(self.target_symbols)) * 100
+        }
+        
+        with open(target_results_file, 'w') as f:
+            json.dump(results_data, f, indent=2)
+        
+        print(f"\n💾 EXPORTS")
+        print("-" * 20)
+        print(f"All symbols: {all_symbols_file}")
+        print(f"Target results: {target_results_file}")
+        
+        return all_symbols_file, target_results_file
+
+
+def find_specific_symbols(symbols_to_find):
+    """
+    Simplified function to find specific symbols
+    
+    Args:
+        symbols_to_find: List of symbols to search for
+    """
+    if not POLYGON_API_KEY:
+        print("❌ POLYGON_API_KEY not found")
+        return
+    
+    finder = StockSymbolFinder(POLYGON_API_KEY, symbols_to_find)
+    found_symbols, all_symbols = finder.comprehensive_search()
+    
+    finder.show_target_results()
+    
+    # Export results
+    date_str = get_date_str()
+    finder.export_results(date_str)
+    
+    # Show recommendations
+    print(f"\n💡 RECOMMENDATIONS")
+    print("-" * 30)
+    
+    missing_symbols = [s for s in symbols_to_find if s not in found_symbols]
+    
+    if missing_symbols:
+        print(f"Missing symbols: {', '.join(missing_symbols)}")
+        print("Possible reasons:")
+        print("1. Symbol might be delisted")
+        print("2. Symbol might be on a different exchange")
+        print("3. Symbol might have a different ticker format")
+        print("4. Symbol might be OTC or Pink Sheets")
+    else:
+        print("🎉 All symbols found!")
+    
+    print(f"\nNext steps:")
+    print(f"1. Review the exported CSV for full symbol list")
+    print(f"2. Check if QSG might be under a different name")
+    print(f"3. Try searching financial websites for QSG details")
+    
+    return found_symbols
+
+
+def main():
+    """Main function for enhanced symbol finding"""
+    import sys
+    
+    # Setup logging
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
+    
+    # Check API key
+    if not POLYGON_API_KEY:
+        print("❌ Please set POLYGON_API_KEY in your .env file")
+        return
+    
+    # Parse command line arguments
+    target_symbols = ['QSG', 'OUST', 'QUBT']  # Default targets
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == 'help':
+            print("Usage:")
+            print("  python enhanced_symbol_finder.py                    # Find QSG, OUST, QUBT")
+            print("  python enhanced_symbol_finder.py AAPL,MSFT,GOOGL   # Find custom symbols")
+            return
+        else:
+            # Custom symbols provided
+            target_symbols = [s.strip().upper() for s in sys.argv[1].split(',')]
+    
+    print(f"🎯 Target symbols: {', '.join(target_symbols)}")
+    
+    # Run the enhanced search
+    found_symbols = find_specific_symbols(target_symbols)
+    
+    # Summary
+    found_count = len(found_symbols) if found_symbols else 0
+    total_count = len(target_symbols)
+    
+    print(f"\n🏁 FINAL RESULT")
+    print("=" * 30)
+    print(f"Found: {found_count}/{total_count} symbols")
+    
+    if found_count == total_count:
+        print("🎉 SUCCESS: All symbols found!")
+        sys.exit(0)
+    elif found_count > 0:
+        print("⚠️ PARTIAL: Some symbols found")
+        sys.exit(0)
+    else:
+        print("❌ FAILURE: No symbols found")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Monitor Dashboard</title>
+    <title>Stock Workflow Dashboard</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <style>
@@ -14,39 +14,35 @@
         }
 
         :root {
-            --primary: #bb86fc;
-            --primary-light: #e7b9ff;
-            --primary-dark: #8858c8;
-            --secondary: #03dac6;
-            --secondary-light: #66fff9;
-            --secondary-dark: #00a896;
-            --error: #cf6679;
-            --warning: #ffb74d;
-            --success: #81c784;
-            --bg-default: #121212;
-            --bg-paper: #1e1e1e;
-            --bg-card: #252525;
-            --text-primary: #ffffff;
-            --text-secondary: #aaaaaa;
-            --border: #333333;
-            --shadow: rgba(0, 0, 0, 0.4);
+            --primary: #2563eb;
+            --primary-light: #60a5fa;
+            --secondary: #10b981;
+            --accent: #f59e0b;
+            --error: #ef4444;
+            --warning: #f97316;
+            --success: #22c55e;
+            --bg-default: #0f172a;
+            --bg-paper: #1e293b;
+            --bg-card: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --border: #475569;
+            --shadow: rgba(0, 0, 0, 0.3);
         }
 
         body {
-            font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background-color: var(--bg-default);
             color: var(--text-primary);
             line-height: 1.6;
         }
 
-        /* Layout */
         .container {
             max-width: 1400px;
             margin: 0 auto;
             padding: 20px;
         }
 
-        /* Header */
         .header {
             background-color: var(--bg-paper);
             padding: 20px 0;
@@ -64,33 +60,29 @@
         }
 
         .header h1 {
-            font-size: 28px;
-            font-weight: 500;
-            color: var(--primary);
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--primary-light);
         }
 
         .header-controls {
             display: flex;
-            gap: 15px;
+            gap: 12px;
             align-items: center;
         }
 
-        /* Buttons */
         .btn {
             background-color: var(--bg-card);
             color: var(--text-primary);
             border: 1px solid var(--border);
-            padding: 10px 20px;
-            border-radius: 8px;
+            padding: 8px 16px;
+            border-radius: 6px;
             cursor: pointer;
             font-size: 14px;
-            transition: all 0.3s ease;
+            transition: all 0.2s ease;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
         }
 
         .btn:hover {
@@ -98,29 +90,14 @@
             border-color: var(--primary);
         }
 
-        .btn-primary {
-            background-color: var(--primary);
-            border-color: var(--primary);
-        }
-
-        .btn-primary:hover {
-            background-color: var(--primary-dark);
-        }
-
-        /* Cards */
         .card {
             background-color: var(--bg-paper);
-            border-radius: 16px;
-            padding: 24px;
+            border-radius: 12px;
+            padding: 20px;
             box-shadow: 0 4px 12px var(--shadow);
-            transition: transform 0.2s ease;
+            margin-bottom: 20px;
         }
 
-        .card:hover {
-            transform: translateY(-2px);
-        }
-
-        /* Grid */
         .grid {
             display: grid;
             gap: 20px;
@@ -132,92 +109,116 @@
         }
 
         .grid-2 {
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
         }
 
-        /* Stats Cards */
         .stat-card {
-            position: relative;
-            overflow: hidden;
-        }
-
-        .stat-card-content {
             display: flex;
             justify-content: space-between;
-            align-items: flex-start;
+            align-items: center;
         }
 
-        .stat-card-text h3 {
+        .stat-content h3 {
             font-size: 14px;
             color: var(--text-secondary);
-            font-weight: 400;
             margin-bottom: 8px;
         }
 
-        .stat-card-text .value {
-            font-size: 32px;
+        .stat-content .value {
+            font-size: 28px;
             font-weight: 700;
-            color: var(--text-primary);
-            margin-bottom: 8px;
+            margin-bottom: 4px;
         }
 
-        .stat-card-text .subtitle {
-            font-size: 14px;
+        .stat-content .subtitle {
+            font-size: 12px;
             color: var(--text-secondary);
         }
 
-        .stat-card-icon {
-            width: 48px;
-            height: 48px;
-            border-radius: 12px;
+        .stat-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 24px;
+            font-size: 20px;
         }
 
-        .stat-card-icon.primary {
-            background-color: rgba(187, 134, 252, 0.1);
-            color: var(--primary);
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
         }
 
-        .stat-card-icon.success {
-            background-color: rgba(129, 199, 132, 0.1);
-            color: var(--success);
-        }
+        .badge-success { background-color: rgba(34, 197, 94, 0.2); color: var(--success); }
+        .badge-error { background-color: rgba(239, 68, 68, 0.2); color: var(--error); }
+        .badge-warning { background-color: rgba(249, 115, 22, 0.2); color: var(--warning); }
+        .badge-qualified { background-color: rgba(16, 185, 129, 0.2); color: var(--secondary); }
 
-        .stat-card-icon.warning {
-            background-color: rgba(255, 183, 77, 0.1);
-            color: var(--warning);
-        }
-
-        .stat-card-icon.info {
-            background-color: rgba(3, 218, 198, 0.1);
-            color: var(--secondary);
-        }
-
-        /* Charts */
-        .chart-container {
+        .search-box {
             position: relative;
-            height: 300px;
-            margin-top: 20px;
+            margin-bottom: 20px;
         }
 
-        /* Table */
-        .table-container {
-            overflow-x: auto;
-            margin-top: 20px;
+        .search-box input {
+            width: 100%;
+            max-width: 300px;
+            padding: 10px 15px 10px 35px;
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-secondary);
+        }
+
+        .time-step-selector {
+            display: flex;
+            gap: 2px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        .time-step-btn {
+            background-color: var(--bg-card);
+            color: var(--text-secondary);
+            border: none;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+
+        .time-step-btn.active {
+            background-color: var(--primary);
+            color: var(--text-primary);
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
+            font-size: 14px;
         }
 
         th, td {
             text-align: left;
-            padding: 12px;
+            padding: 8px 12px;
             border-bottom: 1px solid var(--border);
+            white-space: nowrap;
         }
 
         th {
@@ -225,180 +226,80 @@
             color: var(--text-secondary);
             cursor: pointer;
             user-select: none;
+            transition: color 0.2s ease;
+            position: relative;
+            font-size: 13px;
         }
 
         th:hover {
-            color: var(--primary);
+            color: var(--primary-light);
         }
 
-        td {
-            font-size: 14px;
+        th[onclick] {
+            padding-right: 24px;
+        }
+
+        th[onclick]:hover {
+            background-color: rgba(37, 99, 235, 0.1);
         }
 
         tr:hover {
             background-color: var(--bg-card);
         }
 
-        /* Badges */
-        .badge {
-            display: inline-flex;
+        /* Responsive table */
+        .table-container {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        @media (max-width: 1200px) {
+            th, td {
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+        }
+
+        .progress-indicator {
+            display: flex;
             align-items: center;
             gap: 4px;
-            padding: 4px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
         }
 
-        .badge-success {
-            background-color: rgba(129, 199, 132, 0.2);
-            color: var(--success);
-        }
-
-        .badge-error {
-            background-color: rgba(207, 102, 121, 0.2);
-            color: var(--error);
-        }
-
-        .badge-qualified {
-            background-color: rgba(3, 218, 198, 0.2);
-            color: var(--secondary);
-        }
-
-        /* Search & Filters */
-        .controls {
-            display: flex;
-            gap: 15px;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-
-        .search-box {
-            flex: 1;
-            min-width: 250px;
-            position: relative;
-        }
-
-        .search-box input {
-            width: 100%;
-            padding: 10px 15px 10px 40px;
-            background-color: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            color: var(--text-primary);
-            font-size: 14px;
-        }
-
-        .search-box .icon {
-            position: absolute;
-            left: 12px;
-            top: 50%;
-            transform: translateY(-50%);
-            color: var(--text-secondary);
-        }
-
-        .toggle-group {
-            display: flex;
-            gap: 0;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-
-        .toggle-group button {
-            background-color: var(--bg-card);
-            color: var(--text-secondary);
-            border: none;
-            padding: 10px 20px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-
-        .toggle-group button.active {
-            background-color: var(--primary);
-            color: var(--text-primary);
-        }
-
-        /* Switch */
-        .switch-container {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .switch {
-            position: relative;
-            width: 44px;
-            height: 24px;
-        }
-
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-
-        .switch-slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: var(--bg-card);
-            transition: .4s;
-            border-radius: 24px;
-            border: 1px solid var(--border);
-        }
-
-        .switch-slider:before {
-            position: absolute;
-            content: "";
-            height: 16px;
-            width: 16px;
-            left: 3px;
-            bottom: 3px;
-            background-color: var(--text-secondary);
-            transition: .4s;
+        .progress-step {
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
+            background-color: var(--border);
         }
 
-        .switch input:checked + .switch-slider {
+        .progress-step.completed {
+            background-color: var(--success);
+        }
+
+        .progress-step.current {
             background-color: var(--primary);
-            border-color: var(--primary);
         }
 
-        .switch input:checked + .switch-slider:before {
-            transform: translateX(20px);
-            background-color: white;
-        }
-
-        /* File Input */
-        .file-input-wrapper {
+        .chart-container {
             position: relative;
-            overflow: hidden;
-            display: inline-block;
+            height: 300px;
+            margin-top: 20px;
         }
 
-        .file-input-wrapper input[type=file] {
-            position: absolute;
-            left: -9999px;
-        }
-
-        /* Loading */
         .loading {
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 400px;
+            height: 200px;
         }
 
         .spinner {
-            border: 4px solid var(--bg-card);
-            border-top: 4px solid var(--primary);
+            border: 3px solid var(--bg-card);
+            border-top: 3px solid var(--primary);
             border-radius: 50%;
-            width: 50px;
-            height: 50px;
+            width: 30px;
+            height: 30px;
             animation: spin 1s linear infinite;
         }
 
@@ -407,197 +308,97 @@
             100% { transform: rotate(360deg); }
         }
 
-        /* Responsive */
+        .file-upload {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+
+        .file-upload input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+
         @media (max-width: 768px) {
             .header-content {
                 flex-direction: column;
-                gap: 20px;
+                gap: 15px;
             }
-
-            .controls {
-                flex-direction: column;
+            
+            .grid-4 {
+                grid-template-columns: 1fr;
             }
-
-            .search-box {
-                width: 100%;
+            
+            .grid-2 {
+                grid-template-columns: 1fr;
             }
-        }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar {
-            width: 10px;
-            height: 10px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: var(--bg-default);
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: var(--bg-card);
-            border-radius: 5px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--border);
-        }
-
-        /* Top Movers */
-        .mover-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 10px 0;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .mover-item:last-child {
-            border-bottom: none;
-        }
-
-        .mover-symbol {
-            font-weight: 600;
-        }
-
-        /* Pagination */
-        .pagination {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-top: 20px;
-            padding-top: 20px;
-            border-top: 1px solid var(--border);
-        }
-
-        .pagination-info {
-            color: var(--text-secondary);
-            font-size: 14px;
-        }
-
-        .pagination-controls {
-            display: flex;
-            gap: 10px;
-        }
-
-        .pagination-controls button {
-            padding: 8px 16px;
-            background-color: var(--bg-card);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-        }
-
-        .pagination-controls button:hover:not(:disabled) {
-            background-color: var(--primary);
-            border-color: var(--primary);
-        }
-
-        .pagination-controls button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        select {
-            background-color: var(--bg-card);
-            color: var(--text-primary);
-            border: 1px solid var(--border);
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-size: 14px;
         }
     </style>
 </head>
 <body>
     <header class="header">
         <div class="header-content">
-            <h1>
-                <span>📈</span>
-                Stock Monitor Dashboard
-            </h1>
+            <h1>Stock Workflow Dashboard</h1>
             <div class="header-controls">
-                <div class="file-input-wrapper">
+                <div class="file-upload">
                     <button class="btn" onclick="document.getElementById('csvFile').click()">
-                        <span>📁</span> Upload CSV
+                        📁 Upload CSV
                     </button>
                     <input type="file" id="csvFile" accept=".csv" onchange="handleFileUpload(event)">
                 </div>
-                <div class="switch-container">
-                    <label for="autoRefresh">Auto Refresh</label>
-                    <label class="switch">
-                        <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()">
-                        <span class="switch-slider"></span>
-                    </label>
-                </div>
-                <button class="btn" onclick="refreshData()">
-                    <span>🔄</span> Refresh
-                </button>
+                <button class="btn" onclick="refreshData()">🔄 Refresh</button>
             </div>
         </div>
     </header>
 
     <main class="container">
         <!-- Stats Cards -->
-        <div class="grid grid-4" id="statsGrid">
+        <div class="grid grid-4">
             <div class="card stat-card">
-                <div class="stat-card-content">
-                    <div class="stat-card-text">
-                        <h3>Total Stocks</h3>
-                        <div class="value" id="totalStocks">0</div>
-                        <div class="subtitle">Active symbols</div>
-                    </div>
-                    <div class="stat-card-icon primary">📊</div>
+                <div class="stat-content">
+                    <h3>Total Stocks</h3>
+                    <div class="value" id="totalStocks">0</div>
+                    <div class="subtitle">In dataset</div>
                 </div>
+                <div class="stat-icon" style="background-color: rgba(37, 99, 235, 0.2); color: var(--primary);">📊</div>
             </div>
             <div class="card stat-card">
-                <div class="stat-card-content">
-                    <div class="stat-card-text">
-                        <h3>Qualified</h3>
-                        <div class="value" id="qualifiedStocks">0</div>
-                        <div class="subtitle" id="qualificationRate">0% qualification rate</div>
-                    </div>
-                    <div class="stat-card-icon success">✅</div>
+                <div class="stat-content">
+                    <h3>Qualified 8:37</h3>
+                    <div class="value" id="qualified837">0</div>
+                    <div class="subtitle" id="qualification837Rate">0% qualification</div>
                 </div>
+                <div class="stat-icon" style="background-color: rgba(34, 197, 94, 0.2); color: var(--success);">✅</div>
             </div>
             <div class="card stat-card">
-                <div class="stat-card-content">
-                    <div class="stat-card-text">
-                        <h3>Market Trend</h3>
-                        <div class="value" id="marketTrend">0%</div>
-                        <div class="subtitle" id="gainersLosers">0 gainers, 0 losers</div>
-                    </div>
-                    <div class="stat-card-icon info">📈</div>
+                <div class="stat-content">
+                    <h3>Final Buy List</h3>
+                    <div class="value" id="finalBuyList">0</div>
+                    <div class="subtitle" id="finalBuyRate">0% final rate</div>
                 </div>
+                <div class="stat-icon" style="background-color: rgba(16, 185, 129, 0.2); color: var(--secondary);">🎯</div>
             </div>
             <div class="card stat-card">
-                <div class="stat-card-content">
-                    <div class="stat-card-text">
-                        <h3>Total Volume</h3>
-                        <div class="value" id="totalVolume">0M</div>
-                        <div class="subtitle">Shares traded</div>
-                    </div>
-                    <div class="stat-card-icon warning">📊</div>
+                <div class="stat-content">
+                    <h3>Top Gainers</h3>
+                    <div class="value" id="topGainers">0</div>
+                    <div class="subtitle">Premarket flagged</div>
                 </div>
+                <div class="stat-icon" style="background-color: rgba(245, 158, 11, 0.2); color: var(--accent);">🔥</div>
             </div>
         </div>
 
-        <!-- Charts Section -->
-        <div class="grid grid-2">
-            <div class="card">
-                <h2>Qualification Trend</h2>
-                <div class="chart-container">
-                    <canvas id="trendChart"></canvas>
-                </div>
+        <!-- Time Step Selector and Charts -->
+        <div class="card">
+            <h2 style="margin-bottom: 20px;">Workflow Progress</h2>
+            <div class="time-step-selector">
+                <button class="time-step-btn active" onclick="setTimeStep('all')" id="btn-all">All Steps</button>
+                <button class="time-step-btn" onclick="setTimeStep('8_37')" id="btn-8_37">8:37 Qualification</button>
+                <button class="time-step-btn" onclick="setTimeStep('8_40')" id="btn-8_40">8:40 Momentum</button>
+                <button class="time-step-btn" onclick="setTimeStep('8_50')" id="btn-8_50">8:50 Final</button>
             </div>
-            <div class="card">
-                <h2>Top Movers</h2>
-                <div id="topMovers">
-                    <h3 style="color: var(--success); margin-top: 20px; font-size: 16px;">Top Gainers</h3>
-                    <div id="topGainers"></div>
-                    <h3 style="color: var(--error); margin-top: 30px; font-size: 16px;">Top Losers</h3>
-                    <div id="topLosers"></div>
-                </div>
+            <div class="chart-container">
+                <canvas id="workflowChart"></canvas>
             </div>
         </div>
 
@@ -605,24 +406,19 @@
         <div class="card">
             <h2 style="margin-bottom: 20px;">Stock Data</h2>
             
-            <div class="controls">
+            <div style="display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap;">
                 <div class="search-box">
-                    <span class="icon">🔍</span>
+                    <span class="search-icon">🔍</span>
                     <input type="text" id="searchInput" placeholder="Search symbols..." onkeyup="filterData()">
                 </div>
                 
-                <div class="switch-container">
-                    <label for="qualifiedOnly">Qualified Only</label>
-                    <label class="switch">
-                        <input type="checkbox" id="qualifiedOnly" onchange="filterData()">
-                        <span class="switch-slider"></span>
-                    </label>
-                </div>
-                
-                <div class="toggle-group">
-                    <button class="active" onclick="setViewMode('table')">📋 Table</button>
-                    <button onclick="setViewMode('grid')">⚡ Grid</button>
-                </div>
+                <select id="qualificationFilter" onchange="filterData()" style="background-color: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); padding: 8px 12px; border-radius: 6px;">
+                    <option value="all">All Stocks</option>
+                    <option value="qualified_8_37">Qualified 8:37</option>
+                    <option value="qualified_8_40">Qualified 8:40</option>
+                    <option value="qualified_8_50">Final Buy List</option>
+                    <option value="top_gainer">Top Gainers</option>
+                </select>
             </div>
 
             <div id="dataContainer">
@@ -634,362 +430,399 @@
     </main>
 
     <script>
-        // Global variables
         let rawData = [];
         let filteredData = [];
-        let currentPage = 0;
-        let rowsPerPage = 25;
-        let sortConfig = { key: 'change_pct', direction: 'desc' };
-        let viewMode = 'table';
-        let trendChart = null;
-        let autoRefreshInterval = null;
+        let currentTimeStep = 'all';
+        let workflowChart = null;
+        let sortConfig = { key: null, direction: 'asc' };
 
-        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
-            initializeCharts();
+            initializeChart();
             loadSampleData();
         });
 
-        // Initialize Charts
-        function initializeCharts() {
-            const ctx = document.getElementById('trendChart').getContext('2d');
-            trendChart = new Chart(ctx, {
-                type: 'line',
+        function initializeChart() {
+            const ctx = document.getElementById('workflowChart').getContext('2d');
+            workflowChart = new Chart(ctx, {
+                type: 'bar',
                 data: {
-                    labels: [],
+                    labels: ['Pre-filtered', '8:37 Qualified', '8:40 Momentum', '8:50 Final'],
                     datasets: [{
-                        label: 'Qualified Stocks',
-                        data: [],
-                        borderColor: '#81c784',
-                        backgroundColor: 'rgba(129, 199, 132, 0.1)',
-                        tension: 0.4
-                    }, {
-                        label: 'Total Stocks',
-                        data: [],
-                        borderColor: '#bb86fc',
-                        backgroundColor: 'rgba(187, 134, 252, 0.1)',
-                        tension: 0.4
+                        label: 'Stock Count',
+                        data: [0, 0, 0, 0],
+                        backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#22c55e'],
+                        borderRadius: 4
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
-                        legend: {
-                            labels: {
-                                color: '#ffffff'
-                            }
-                        }
+                        legend: { display: false }
                     },
                     scales: {
                         x: {
-                            grid: {
-                                color: '#333'
-                            },
-                            ticks: {
-                                color: '#aaa'
-                            }
+                            grid: { display: false },
+                            ticks: { color: '#cbd5e1' }
                         },
                         y: {
-                            grid: {
-                                color: '#333'
-                            },
-                            ticks: {
-                                color: '#aaa'
-                            }
+                            grid: { color: '#475569' },
+                            ticks: { color: '#cbd5e1' }
                         }
                     }
                 }
             });
         }
 
-        // Load sample data
         function loadSampleData() {
-            const symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'AMD', 'NFLX', 'ROKU'];
-            const data = [];
+            // Load your actual CSV data here
+            const sampleData = [
+                {
+                    symbol: 'AAPL',
+                    company_name: 'Apple Inc.',
+                    top_gainer: true,
+                    previous_close: 150.00,
+                    today_price_8_37: 157.50,
+                    today_price_8_40: 158.25,
+                    today_price_8_50: 159.25,
+                    today_volume_8_37: 1500000,
+                    calculated_market_cap: 2500.50,
+                    qualified_8_37: true,
+                    qualified_8_40: true,
+                    qualified_8_50: true,
+                    qualification_reason: 'All criteria met'
+                },
+                {
+                    symbol: 'TSLA',
+                    company_name: 'Tesla Inc.',
+                    top_gainer: false,
+                    previous_close: 200.00,
+                    today_price_8_37: 212.00,
+                    today_price_8_40: 210.50,
+                    today_price_8_50: 214.75,
+                    today_volume_8_37: 2200000,
+                    calculated_market_cap: 675.30,
+                    qualified_8_37: true,
+                    qualified_8_40: false,
+                    qualified_8_50: false,
+                    qualification_reason: 'Lost momentum at 8:40'
+                },
+                {
+                    symbol: 'NVDA',
+                    company_name: 'NVIDIA Corporation',
+                    top_gainer: true,
+                    previous_close: 425.00,
+                    today_price_8_37: 445.25,
+                    today_price_8_40: 448.80,
+                    today_price_8_50: 452.15,
+                    today_volume_8_37: 3100000,
+                    calculated_market_cap: 1100.75,
+                    qualified_8_37: true,
+                    qualified_8_40: true,
+                    qualified_8_50: true,
+                    qualification_reason: 'Strong momentum maintained'
+                }
+            ];
             
-            const baseTime = new Date();
-            baseTime.setHours(8, 30, 0, 0);
-            
-            for (let i = 0; i < 30; i++) {
-                const timestamp = new Date(baseTime.getTime() + i * 60000);
-                
-                symbols.forEach(symbol => {
-                    const basePrice = 100 + Math.random() * 200;
-                    const volatility = Math.random() * 0.05;
-                    const trend = Math.random() > 0.5 ? 1 : -1;
-                    
-                    data.push({
-                        timestamp: timestamp.toISOString(),
-                        symbol: symbol,
-                        market_cap_millions: (1000 + Math.random() * 9000).toFixed(2),
-                        previous_close: basePrice.toFixed(2),
-                        open: (basePrice * (1 + trend * volatility)).toFixed(2),
-                        current_price: (basePrice * (1 + trend * volatility * 2)).toFixed(2),
-                        bid: (basePrice * (1 + trend * volatility * 1.9)).toFixed(2),
-                        ask: (basePrice * (1 + trend * volatility * 2.1)).toFixed(2),
-                        volume: Math.floor(Math.random() * 1000000),
-                        day_high: (basePrice * (1 + Math.abs(volatility) * 2)).toFixed(2),
-                        day_low: (basePrice * (1 - Math.abs(volatility) * 2)).toFixed(2),
-                        change_pct: (trend * volatility * 100).toFixed(2),
-                        change_from_open_pct: (trend * volatility * 50).toFixed(2),
-                        meets_criteria: Math.random() > 0.7 ? 'Y' : 'N'
-                    });
-                });
-            }
-            
-            processData(data);
+            processData(sampleData);
         }
 
-        // Process uploaded CSV file
         function handleFileUpload(event) {
             const file = event.target.files[0];
             if (file) {
                 Papa.parse(file, {
                     header: true,
                     complete: function(results) {
-                        processData(results.data);
+                        processData(results.data.filter(row => row.symbol)); // Filter out empty rows
+                    },
+                    error: function(error) {
+                        console.error('CSV parsing error:', error);
+                        alert('Error parsing CSV file. Please check the format.');
                     }
                 });
             }
         }
 
-        // Process data
         function processData(data) {
-            rawData = data;
-            filteredData = data.filter(d => d.meets_criteria === 'Y');
+            rawData = data.map(row => ({
+                ...row,
+                // Convert string values to appropriate types
+                previous_close: parseFloat(row.previous_close) || 0,
+                today_price_8_37: parseFloat(row.today_price_8_37) || 0,
+                today_price_8_40: parseFloat(row.today_price_8_40) || 0,
+                today_price_8_50: parseFloat(row.today_price_8_50) || 0,
+                today_volume_8_37: parseInt(row.today_volume_8_37) || 0,
+                calculated_market_cap: parseFloat(row.calculated_market_cap) || 0,
+                qualified_8_37: row.qualified_8_37 === 'True' || row.qualified_8_37 === true,
+                qualified_8_40: row.qualified_8_40 === 'True' || row.qualified_8_40 === true,
+                qualified_8_50: row.qualified_8_50 === 'True' || row.qualified_8_50 === true,
+                top_gainer: row.top_gainer === 'True' || row.top_gainer === true
+            }));
+            
             updateStats();
-            updateCharts();
-            updateTopMovers();
+            updateChart();
+            
+            // Set default sort by 8:50 change percentage (descending) for new data
+            sortConfig.key = 'change_8_50';
+            sortConfig.direction = 'asc'; // Will be toggled to desc
+            
             filterData();
         }
 
-        // Update statistics
         function updateStats() {
-            const latestData = getLatestData(rawData);
-            const qualified = latestData.filter(d => d.meets_criteria === 'Y');
-            const totalVolume = latestData.reduce((sum, d) => sum + parseInt(d.volume || 0), 0);
-            const avgChange = latestData.reduce((sum, d) => sum + parseFloat(d.change_pct || 0), 0) / latestData.length;
-            const gainers = latestData.filter(d => parseFloat(d.change_pct) > 0).length;
-            const losers = latestData.filter(d => parseFloat(d.change_pct) < 0).length;
-            
-            document.getElementById('totalStocks').textContent = latestData.length;
-            document.getElementById('qualifiedStocks').textContent = qualified.length;
-            document.getElementById('qualificationRate').textContent = 
-                `${(qualified.length / latestData.length * 100).toFixed(1)}% qualification rate`;
-            document.getElementById('marketTrend').textContent = 
-                `${avgChange >= 0 ? '+' : ''}${avgChange.toFixed(2)}%`;
-            document.getElementById('gainersLosers').textContent = 
-                `${gainers} gainers, ${losers} losers`;
-            document.getElementById('totalVolume').textContent = 
-                `${(totalVolume / 1000000).toFixed(1)}M`;
+            const total = rawData.length;
+            const qualified837 = rawData.filter(row => row.qualified_8_37).length;
+            const qualified840 = rawData.filter(row => row.qualified_8_40).length;
+            const qualified850 = rawData.filter(row => row.qualified_8_50).length;
+            const topGainers = rawData.filter(row => row.top_gainer).length;
+
+            document.getElementById('totalStocks').textContent = total;
+            document.getElementById('qualified837').textContent = qualified837;
+            document.getElementById('qualification837Rate').textContent = 
+                `${total > 0 ? (qualified837 / total * 100).toFixed(1) : 0}% qualification`;
+            document.getElementById('finalBuyList').textContent = qualified850;
+            document.getElementById('finalBuyRate').textContent = 
+                `${total > 0 ? (qualified850 / total * 100).toFixed(1) : 0}% final rate`;
+            document.getElementById('topGainers').textContent = topGainers;
         }
 
-        // Get latest data for each symbol
-        function getLatestData(data) {
-            const latestBySymbol = {};
-            
-            data.forEach(item => {
-                if (!latestBySymbol[item.symbol] || 
-                    new Date(item.timestamp) > new Date(latestBySymbol[item.symbol].timestamp)) {
-                    latestBySymbol[item.symbol] = item;
-                }
-            });
-            
-            return Object.values(latestBySymbol);
+        function updateChart() {
+            const total = rawData.length;
+            const qualified837 = rawData.filter(row => row.qualified_8_37).length;
+            const qualified840 = rawData.filter(row => row.qualified_8_40).length;
+            const qualified850 = rawData.filter(row => row.qualified_8_50).length;
+
+            workflowChart.data.datasets[0].data = [total, qualified837, qualified840, qualified850];
+            workflowChart.update();
         }
 
-        // Update charts
-        function updateCharts() {
-            const timeData = {};
+        function setTimeStep(step) {
+            currentTimeStep = step;
             
-            rawData.forEach(item => {
-                const time = new Date(item.timestamp).toLocaleTimeString('en-US', { 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
-                });
-                
-                if (!timeData[time]) {
-                    timeData[time] = { qualified: 0, total: 0 };
-                }
-                
-                timeData[time].total++;
-                if (item.meets_criteria === 'Y') timeData[time].qualified++;
-            });
+            // Update button states
+            document.querySelectorAll('.time-step-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(`btn-${step}`).classList.add('active');
             
-            const labels = Object.keys(timeData);
-            const qualifiedCounts = labels.map(l => timeData[l].qualified);
-            const totalCounts = labels.map(l => timeData[l].total);
-            
-            trendChart.data.labels = labels;
-            trendChart.data.datasets[0].data = qualifiedCounts;
-            trendChart.data.datasets[1].data = totalCounts;
-            trendChart.update();
+            filterData();
         }
 
-        // Update top movers
-        function updateTopMovers() {
-            const latestData = getLatestData(rawData);
-            const sorted = [...latestData].sort((a, b) => 
-                Math.abs(parseFloat(b.change_pct)) - Math.abs(parseFloat(a.change_pct))
-            );
-            
-            const gainers = sorted.filter(d => parseFloat(d.change_pct) > 0).slice(0, 5);
-            const losers = sorted.filter(d => parseFloat(d.change_pct) < 0).slice(0, 5);
-            
-            document.getElementById('topGainers').innerHTML = gainers.map(stock => `
-                <div class="mover-item">
-                    <span class="mover-symbol">${stock.symbol}</span>
-                    <span class="badge badge-success">+${stock.change_pct}%</span>
-                </div>
-            `).join('');
-            
-            document.getElementById('topLosers').innerHTML = losers.map(stock => `
-                <div class="mover-item">
-                    <span class="mover-symbol">${stock.symbol}</span>
-                    <span class="badge badge-error">${stock.change_pct}%</span>
-                </div>
-            `).join('');
-        }
-
-        // Filter data based on search and criteria
         function filterData() {
             const searchQuery = document.getElementById('searchInput').value.toLowerCase();
-            const qualifiedOnly = document.getElementById('qualifiedOnly').checked;
+            const qualFilter = document.getElementById('qualificationFilter').value;
             
-            let data = getLatestData(qualifiedOnly ? filteredData : rawData);
+            let data = [...rawData];
             
+            // Apply search filter
             if (searchQuery) {
-                data = data.filter(item => 
-                    item.symbol.toLowerCase().includes(searchQuery)
+                data = data.filter(row => 
+                    row.symbol.toLowerCase().includes(searchQuery) ||
+                    row.company_name.toLowerCase().includes(searchQuery)
                 );
             }
             
-            renderData(data);
-        }
-
-        // Render data based on view mode
-        function renderData(data) {
-            const container = document.getElementById('dataContainer');
+            // Apply qualification filter
+            if (qualFilter !== 'all') {
+                data = data.filter(row => row[qualFilter] === true);
+            }
             
-            if (viewMode === 'table') {
-                renderTable(data);
+            filteredData = data;
+            
+            // Apply default sort by symbol if no sort is set
+            if (!sortConfig.key) {
+                sortConfig.key = 'symbol';
+                sortConfig.direction = 'asc';
+            }
+            
+            // Reapply current sort
+            if (sortConfig.key) {
+                const currentKey = sortConfig.key;
+                const currentDirection = sortConfig.direction;
+                sortConfig.key = null; // Reset to trigger sort
+                sortConfig.direction = currentDirection === 'asc' ? 'desc' : 'asc'; // Will be toggled back
+                sortData(currentKey);
             } else {
-                renderGrid(data);
+                renderTable();
             }
         }
 
-        // Render table view
-        function renderTable(data) {
-            // Sort data
-            const sorted = [...data].sort((a, b) => {
-                const aValue = parseFloat(a[sortConfig.key]) || 0;
-                const bValue = parseFloat(b[sortConfig.key]) || 0;
-                
-                if (sortConfig.direction === 'asc') {
-                    return aValue - bValue;
-                }
-                return bValue - aValue;
-            });
-            
-            // Paginate
-            const start = currentPage * rowsPerPage;
-            const paginatedData = sorted.slice(start, start + rowsPerPage);
-            
+        function refreshData() {
+            if (rawData.length > 0) {
+                processData(rawData);
+            }
+        }
+
+        function renderTable() {
+            // Add change_percent to filtered data for sorting
+            const dataWithChangePercent = filteredData.map(row => ({
+                ...row,
+                change_percent: row.previous_close > 0 ? 
+                    ((row.today_price_8_50 - row.previous_close) / row.previous_close * 100) : 0
+            }));
+
             let html = `
                 <div class="table-container">
                     <table>
                         <thead>
                             <tr>
-                                <th onclick="sortTable('symbol')">Symbol ${getSortIcon('symbol')}</th>
-                                <th onclick="sortTable('current_price')">Price ${getSortIcon('current_price')}</th>
-                                <th onclick="sortTable('change_pct')">Change % ${getSortIcon('change_pct')}</th>
-                                <th onclick="sortTable('volume')">Volume ${getSortIcon('volume')}</th>
-                                <th>Market Cap</th>
-                                <th>Qualified</th>
-                                <th>Bid/Ask</th>
+                                <th onclick="sortData('symbol')" style="cursor: pointer;">
+                                    Symbol <span style="float: right;">${getSortIcon('symbol')}</span>
+                                </th>
+                                <th onclick="sortData('company_name')" style="cursor: pointer;">
+                                    Company <span style="float: right;">${getSortIcon('company_name')}</span>
+                                </th>
+                                <th>Progress</th>
+                                <th onclick="sortData('today_price_8_37')" style="cursor: pointer;">
+                                    8:37 Price <span style="float: right;">${getSortIcon('today_price_8_37')}</span>
+                                </th>
+                                <th onclick="sortData('today_price_8_50')" style="cursor: pointer;">
+                                    8:50 Price <span style="float: right;">${getSortIcon('today_price_8_50')}</span>
+                                </th>
+                                <th onclick="sortData('change_percent')" style="cursor: pointer;">
+                                    Change % <span style="float: right;">${getSortIcon('change_percent')}</span>
+                                </th>
+                                <th onclick="sortData('calculated_market_cap')" style="cursor: pointer;">
+                                    Market Cap <span style="float: right;">${getSortIcon('calculated_market_cap')}</span>
+                                </th>
+                                <th onclick="sortData('today_volume_8_37')" style="cursor: pointer;">
+                                    Volume <span style="float: right;">${getSortIcon('today_volume_8_37')}</span>
+                                </th>
+                                <th onclick="sortData('qualified_8_50')" style="cursor: pointer;">
+                                    Status <span style="float: right;">${getSortIcon('qualified_8_50')}</span>
+                                </th>
                             </tr>
                         </thead>
                         <tbody>
             `;
             
-            paginatedData.forEach(row => {
-                const changeClass = parseFloat(row.change_pct) >= 0 ? 'success' : 'error';
+            dataWithChangePercent.forEach(row => {
+                const changePercent = row.change_percent;
+                const changeClass = changePercent >= 0 ? 'success' : 'error';
+                
                 html += `
                     <tr>
                         <td style="font-weight: 600;">${row.symbol}</td>
-                        <td>${row.current_price}</td>
+                        <td style="color: var(--text-secondary);">${row.company_name || 'N/A'}</td>
+                        <td>${renderProgressIndicator(row)}</td>
+                        <td>${row.today_price_8_37.toFixed(2)}</td>
+                        <td>${row.today_price_8_50.toFixed(2)}</td>
                         <td>
                             <span class="badge badge-${changeClass}">
-                                ${parseFloat(row.change_pct) >= 0 ? '▲' : '▼'} ${row.change_pct}%
+                                ${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%
                             </span>
                         </td>
-                        <td>${parseInt(row.volume).toLocaleString()}</td>
-                        <td>${row.market_cap_millions}M</td>
-                        <td style="text-align: center;">
-                            ${row.meets_criteria === 'Y' ? 
-                                '<span style="color: var(--success);">✅</span>' : 
-                                '<span style="color: var(--error);">❌</span>'}
-                        </td>
-                        <td>${row.bid}/${row.ask}</td>
+                        <td>${row.calculated_market_cap.toFixed(1)}M</td>
+                        <td>${(row.today_volume_8_37 / 1000000).toFixed(2)}M</td>
+                        <td>${renderStatusBadges(row)}</td>
                     </tr>
                 `;
             });
-            html += `
-                        </tbody>
-                    </table>
-                </div>
-                <div class="pagination">
-                    <div class="pagination-info">
-                        Showing ${start + 1}–${Math.min(start + rowsPerPage, sorted.length)} of ${sorted.length} stocks
-                    </div>
-                    <div class="pagination-controls">
-                        <button onclick="prevPage()" ${currentPage === 0 ? 'disabled' : ''}>Prev</button>
-                        <button onclick="nextPage()" ${(start + rowsPerPage) >= sorted.length ? 'disabled' : ''}>Next</button>
-                    </div>
-                </div>
-            `;
+            
+            html += '</tbody></table></div>';
             document.getElementById('dataContainer').innerHTML = html;
         }
 
-        // Render grid view
-        function renderGrid(data) {
-            // Implementation of renderGrid function
+        function renderProgressIndicator(row) {
+            return `
+                <div class="progress-indicator">
+                    <div class="progress-step completed"></div>
+                    <div class="progress-step ${row.qualified_8_37 ? 'completed' : ''}"></div>
+                    <div class="progress-step ${row.qualified_8_40 ? 'completed' : ''}"></div>
+                    <div class="progress-step ${row.qualified_8_50 ? 'completed' : ''}"></div>
+                </div>
+            `;
         }
 
-        // Sort table
-        function sortTable(key) {
-            // Implementation of sortTable function
+        function renderStatusBadges(row) {
+            let badges = '';
+            
+            if (row.top_gainer) {
+                badges += '<span class="badge badge-warning">🔥 Gainer</span> ';
+            }
+            
+            if (row.qualified_8_50) {
+                badges += '<span class="badge badge-success">✅ Buy</span>';
+            } else if (row.qualified_8_40) {
+                badges += '<span class="badge badge-qualified">📈 Momentum</span>';
+            } else if (row.qualified_8_37) {
+                badges += '<span class="badge badge-qualified">⭐ Qualified</span>';
+            }
+            
+            return badges || '<span style="color: var(--text-secondary);">-</span>';
         }
 
-        // Get sort icon
+        function sortData(key) {
+            if (sortConfig.key === key) {
+                // Toggle direction if same column
+                sortConfig.direction = sortConfig.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                // New column, default to descending for numeric, ascending for text
+                sortConfig.key = key;
+                sortConfig.direction = isNumericColumn(key) ? 'desc' : 'asc';
+            }
+            
+            // Add calculated fields for sorting
+            const dataWithCalculated = filteredData.map(row => {
+                const change_8_37 = row.previous_close > 0 ? 
+                    ((row.today_price_8_37 - row.previous_close) / row.previous_close * 100) : 0;
+                const change_8_40 = row.previous_close > 0 ? 
+                    ((row.today_price_8_40 - row.previous_close) / row.previous_close * 100) : 0;
+                const change_8_50 = row.previous_close > 0 ? 
+                    ((row.today_price_8_50 - row.previous_close) / row.previous_close * 100) : 0;
+                
+                return {
+                    ...row,
+                    change_8_37,
+                    change_8_40,
+                    change_8_50,
+                    change_percent: change_8_50
+                };
+            });
+            
+            dataWithCalculated.sort((a, b) => {
+                let aVal = a[key];
+                let bVal = b[key];
+                
+                // Handle different data types
+                if (isNumericColumn(key)) {
+                    aVal = parseFloat(aVal) || 0;
+                    bVal = parseFloat(bVal) || 0;
+                } else if (typeof aVal === 'boolean') {
+                    aVal = aVal ? 1 : 0;
+                    bVal = bVal ? 1 : 0;
+                } else {
+                    aVal = String(aVal || '').toLowerCase();
+                    bVal = String(bVal || '').toLowerCase();
+                }
+                
+                if (sortConfig.direction === 'asc') {
+                    return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+                } else {
+                    return aVal > bVal ? -1 : aVal < bVal ? 1 : 0;
+                }
+            });
+            
+            // Update filteredData with sorted results (without calculated fields)
+            filteredData = dataWithCalculated.map(row => {
+                const { change_8_37, change_8_40, change_8_50, change_percent, ...originalRow } = row;
+                return originalRow;
+            });
+            
+            renderTable();
+        }
+
+        function isNumericColumn(key) {
+            const numericColumns = ['previous_close', 'today_price_8_37', 'today_price_8_40', 'today_price_8_50', 
+                                  'calculated_market_cap', 'today_volume_8_37', 'change_percent', 
+                                  'change_8_37', 'change_8_40', 'change_8_50'];
+            return numericColumns.includes(key);
+        }
+
         function getSortIcon(key) {
-            // Implementation of getSortIcon function
-        }
-
-        // Set view mode
-        function setViewMode(mode) {
-            // Implementation of setViewMode function
-        }
-
-        // Toggle auto refresh
-        function toggleAutoRefresh() {
-            // Implementation of toggleAutoRefresh function
-        }
-
-        // Refresh data
-        function refreshData() {
-            // Implementation of refreshData function
-        }
-
-        // Previous page
-        function prevPage() {
-            // Implementation of prevPage function
-        }
-
-        // Next page
-        function nextPage() {
-            // Implementation of nextPage function
+            if (sortConfig.key !== key) return '<span style="color: var(--border);">↕</span>';
+            const color = 'var(--primary-light)';
+            return sortConfig.direction === 'asc' ? 
+                `<span style="color: ${color};">↑</span>` : 
+                `<span style="color: ${color};">↓</span>`;
         }
     </script>
 </body>

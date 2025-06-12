@@ -1,4 +1,4 @@
-# data_fetcher.py - Handles API calls and data collection
+# data_fetcher.py - Updated with comprehensive symbol search
 import asyncio
 import aiohttp
 import re
@@ -97,6 +97,7 @@ class DataFetcher:
                     stock_data['previous_price_pct_change_from_open'] = pct_change
                 else:
                     stock_data['previous_price_pct_change_from_open'] = 0.0
+                    
             else:
                 update_stats(stats, incomplete_records=1)
                 return None
@@ -232,7 +233,7 @@ class DataFetcher:
         return all_complete_results
     
     def get_latest_nasdaq_symbols_from_s3(self):
-        """Download latest NASDAQ symbols from S3"""
+        """Download latest comprehensive symbols from S3"""
         try:
             import boto3
             s3 = boto3.client("s3")
@@ -243,14 +244,16 @@ class DataFetcher:
                 return None
                 
             files = [obj['Key'] for obj in response['Contents'] if obj['Key'].endswith('.csv')]
-            date_pattern = re.compile(r'nasdaq_symbols_(\d{8})\.csv')
+            
+            # Look for nasdaq_symbols files (preferred) or comprehensive_symbols files
+            date_pattern = re.compile(r'(nasdaq_symbols|comprehensive_symbols)_(\d{8})\.csv')
             latest_file = None
             latest_date = None
             
             for f in files:
                 m = date_pattern.search(f)
                 if m:
-                    file_date = m.group(1)
+                    file_date = m.group(2)
                     if latest_date is None or file_date > latest_date:
                         latest_date = file_date
                         latest_file = f
@@ -258,7 +261,7 @@ class DataFetcher:
             if not latest_file:
                 return None
                 
-            local_path = f"nasdaq_symbols_{latest_date}.csv"
+            local_path = f"symbols_{latest_date}.csv"
             if download_from_s3(self.s3_bucket, latest_file, local_path):
                 return local_path
             return None
@@ -267,8 +270,88 @@ class DataFetcher:
             logger.error(f"Error downloading symbols from S3: {e}")
             return None
     
+    def get_comprehensive_search_configs(self):
+        """Get comprehensive search configurations for fallback"""
+        return [
+            {'market': 'stocks', 'exchange': 'XNAS', 'type_filter': 'CS'},  # NASDAQ
+            {'market': 'stocks', 'exchange': 'XNYS', 'type_filter': 'CS'},  # NYSE
+            {'market': 'stocks', 'exchange': None, 'type_filter': 'CS'},    # All US stocks
+        ]
+    
+    def _fetch_symbols_from_polygon_api(self, max_symbols=None):
+        """Enhanced fallback method with comprehensive search"""
+        try:
+            client = RESTClient(self.api_key)
+            all_symbols = set()
+            
+            logger.info("Using comprehensive symbol search as fallback")
+            
+            # Try multiple search configurations
+            configs = self.get_comprehensive_search_configs()
+            
+            for config in configs:
+                try:
+                    logger.info(f"Searching: market={config.get('market', 'all')}, exchange={config.get('exchange', 'all')}")
+                    
+                    search_params = {'active': True, 'limit': 1000}
+                    if config['market']:
+                        search_params['market'] = config['market']
+                    if config['exchange']:
+                        search_params['exchange'] = config['exchange']
+                    
+                    config_symbols = set()
+                    item_count = 0
+                    max_items_per_config = 50000  # Reasonable limit
+                    
+                    tickers_iter = client.list_tickers(**search_params)
+                    
+                    for ticker in tickers_iter:
+                        # Apply type filter
+                        if config['type_filter'] and hasattr(ticker, 'type'):
+                            if ticker.type != config['type_filter']:
+                                continue
+                        
+                        # Basic symbol validation
+                        symbol = ticker.ticker.strip().upper()
+                        if (symbol.isalpha() and 
+                            len(symbol) <= 6 and 
+                            symbol not in ['TEST', 'EXAMPLE']):
+                            config_symbols.add(symbol)
+                        
+                        item_count += 1
+                        if item_count >= max_items_per_config:
+                            logger.info(f"Reached limit for config: {max_items_per_config}")
+                            break
+                    
+                    logger.info(f"Config found {len(config_symbols)} symbols")
+                    all_symbols.update(config_symbols)
+                    
+                    # Stop if we have enough symbols
+                    if max_symbols and len(all_symbols) >= max_symbols * 2:
+                        break
+                        
+                except Exception as e:
+                    logger.warning(f"Config failed: {e}")
+                    continue
+            
+            if not all_symbols:
+                logger.error("No symbols found in comprehensive search")
+                return []
+            
+            symbols_list = sorted(list(all_symbols))
+            
+            if max_symbols:
+                symbols_list = symbols_list[:max_symbols]
+            
+            logger.info(f"Comprehensive search found {len(symbols_list)} symbols")
+            return symbols_list
+            
+        except Exception as e:
+            logger.error(f"Comprehensive symbol search failed: {e}")
+            return []
+    
     def get_symbols_with_fallback(self, max_symbols=None):
-        """Get symbols from S3, fallback to Polygon API"""
+        """Get symbols from S3, fallback to comprehensive Polygon API search"""
         local_symbols_path = self.get_latest_nasdaq_symbols_from_s3()
         
         if local_symbols_path and os.path.exists(local_symbols_path):
@@ -294,40 +377,6 @@ class DataFetcher:
             except Exception as e:
                 logger.warning(f"Error reading symbols from S3: {e}")
         
-        # Fallback to Polygon API
+        # Fallback to comprehensive Polygon API search
+        logger.info("Falling back to comprehensive Polygon API search")
         return self._fetch_symbols_from_polygon_api(max_symbols)
-    
-    def _fetch_symbols_from_polygon_api(self, max_symbols=None):
-        """Fallback method to fetch symbols from Polygon API"""
-        try:
-            client = RESTClient(self.api_key)
-            
-            all_tickers = []
-            tickers_iter = client.list_tickers(
-                market="stocks", 
-                exchange="XNAS", 
-                active=True, 
-                limit=1000
-            )
-            
-            for ticker in tickers_iter:
-                if hasattr(ticker, 'type') and ticker.type != 'CS':
-                    continue
-                if '/' in ticker.ticker:
-                    continue
-                
-                symbol = ticker.ticker.strip().upper()
-                if symbol.isalpha() and len(symbol) <= 6:
-                    all_tickers.append(symbol)
-            
-            symbols = sorted(list(set(all_tickers)))
-            logger.info(f"Fetched {len(symbols)} symbols from Polygon API")
-            
-            if max_symbols:
-                symbols = symbols[:max_symbols]
-            
-            return symbols
-            
-        except Exception as e:
-            logger.error(f"Fallback symbol fetch failed: {e}")
-            return []

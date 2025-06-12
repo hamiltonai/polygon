@@ -1,0 +1,1 @@
+-remove the sns of the main_scheduler running
