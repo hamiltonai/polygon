@@ -5,8 +5,8 @@ from datetime import datetime
 import pytz
 from premarket_gainers import get_premarket_top_gainers
 from nasdaq_symbols import get_nasdaq_symbols
-from initial_data_pull import run_prefiltered_data_pull, run_initial_data_pull
-from qualification_filter import run_8_37_qualification, get_qualified_symbols_8_37
+from initial_data_pull import run_prefiltered_data_pull
+from qualification_filter import run_8_37_qualification
 from intraday_updates import run_8_40_momentum_check, run_8_50_momentum_check, get_final_buy_symbols
 from config import setup_logging, validate_config, SNS_TOPIC_ARN
 from utils import get_date_str, send_sns_notification
