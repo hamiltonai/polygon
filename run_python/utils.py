@@ -56,9 +56,16 @@ def send_sns_notification(topic_arn, subject, message):
         logger.error(f"Failed to send SNS notification: {e}")
         return False
 
+def find_column_value(stock_dict, suffix):
+    """Find value from column ending with specific suffix"""
+    for key, value in stock_dict.items():
+        if key.endswith(suffix):
+            return value
+    return None
+
 def format_buy_list_sns(qualified_stocks, summary_stats, date_str, time_str):
     """
-    Format buy list for SNS notification
+    Format buy list for SNS notification with prefixed column support
     
     Args:
         qualified_stocks (list): List of qualified stock dictionaries
@@ -77,36 +84,38 @@ def format_buy_list_sns(qualified_stocks, summary_stats, date_str, time_str):
             symbols_header += f" (+{len(buy_symbols)-10} more)"
         
         # Create subject
-        subject = f"🚀 BUY LIST ({len(buy_symbols)} stocks) - {symbols_header}"
+        subject = f"BUY LIST ({len(buy_symbols)} stocks) - {symbols_header}"
         
         # Create message body
-        message = f"""🚀 STOCK BUY LIST
+        message = f"""STOCK BUY LIST
 
 Date: {date_str}
 Time: {time_str} CDT
 Final Qualified Stocks: {len(buy_symbols)}
 
-📊 SUMMARY STATISTICS:
+SUMMARY STATISTICS:
 • Total Stocks Analyzed: {summary_stats.get('total_analyzed', 'N/A'):,}
 • Pre-filtered (8:25): {summary_stats.get('pre_filtered', 'N/A'):,}
 • Qualified (8:37): {summary_stats.get('qualified_8_37', 'N/A'):,}
 • Maintained Momentum (8:40): {summary_stats.get('maintained_8_40', 'N/A'):,}
 • Final Buy List (8:50): {summary_stats.get('final_buy_list', 'N/A'):,}
 
-🎯 BUY STOCKS:
+BUY STOCKS:
 {', '.join(buy_symbols)}
 """
         
         if qualified_stocks:
-            message += f"\n📈 DETAILED BUY LIST:\n"
+            message += f"\nDETAILED BUY LIST:\n"
             
             for i, stock in enumerate(qualified_stocks, 1):
                 symbol = stock.get('symbol', 'N/A')
                 company = stock.get('company_name', 'N/A')
-                price_837 = stock.get('price_8_37', 0)
-                price_850 = stock.get('price_8_50', 0) 
-                prev_close = stock.get('close', 0)
-                volume = stock.get('volume', 0)
+                
+                # Use helper function to find values with prefixed columns
+                price_837 = stock.get('today_price_8_37') or find_column_value(stock, '_price_8_37') or 0
+                price_850 = stock.get('today_price_8_50') or find_column_value(stock, '_price_8_50') or price_837
+                prev_close = find_column_value(stock, '_close') or stock.get('close', 0)
+                volume = stock.get('today_volume_8_37') or find_column_value(stock, '_volume_8_37') or stock.get('volume', 0)
                 mcap = stock.get('calculated_market_cap', 0)
                 
                 # Calculate gain percentage
@@ -154,7 +163,7 @@ Generated automatically by Polygon Stock Screener
         logger.error(f"Error formatting buy list SNS: {e}")
         # Fallback to simple format
         symbols = ', '.join([stock.get('symbol', 'N/A') for stock in qualified_stocks])
-        subject = f"🚀 BUY LIST ({len(qualified_stocks)} stocks)"
+        subject = f"BUY LIST ({len(qualified_stocks)} stocks)"
         message = f"Buy List for {date_str} at {time_str}:\n\n{symbols}"
         return subject, message
 

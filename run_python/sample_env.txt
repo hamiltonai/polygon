@@ -1,0 +1,32 @@
+# Required Environment Variables
+POLYGON_API_KEY=test
+SNS_TOPIC_ARN=test
+BUCKET_NAME=test
+TIMEZONE=America/Chicago
+FIRECRAWL_API_KEY=test
+
+# Optional Performance Settings (with defaults)
+MAX_CONCURRENT_REQUESTS=35
+REQUEST_TIMEOUT=18
+BATCH_SIZE=75
+MAX_RETRIES=3
+RETRY_DELAY=0.3
+BATCH_DELAY=0.5
+
+# Quality Settings
+MIN_COMPLETE_RATE=0.6
+
+# SNS Configuration (NEW)
+SEND_BUY_LIST_SNS=True
+
+# Pre-filtering Thresholds (NEW)
+MIN_MARKET_CAP_MILLIONS=50
+MIN_PREVIOUS_CLOSE=3.00
+
+# Qualification Thresholds (NEW) 
+MIN_VOLUME_MILLIONS=1.0
+MIN_PRICE_CHANGE_PCT=5.0
+MAX_PRICE_CHANGE_PCT=60.0
+
+# AWS Region (if not using default)
+# AWS_DEFAULT_REGION=us-east-1

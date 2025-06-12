@@ -18,24 +18,31 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 def ensure_filtered_data_exists(date_str, s3_bucket):
-    """
-    Ensure filtered_raw_data_YYYYMMDD.csv exists locally.
-    Downloads from S3 if available, otherwise raises an error.
-    
-    Returns:
-        str: Local path to the filtered data file
-    """
+    """Ensure filtered_raw_data_YYYYMMDD.csv exists locally"""
     from utils import download_from_s3
     
     filename = f"filtered_raw_data_{date_str}.csv"
     s3_key = f"stock_data/{date_str}/{filename}"
     
-    # Try to download from S3
     if download_from_s3(s3_bucket, s3_key, filename):
         logger.info(f"Downloaded {filename} from S3")
         return filename
     else:
         raise FileNotFoundError(f"Filtered data file not found: {s3_key}")
+
+def find_column_with_suffix(df, suffix):
+    """Find column ending with specific suffix"""
+    matching_cols = [col for col in df.columns if col.endswith(suffix)]
+    return matching_cols[0] if matching_cols else None
+
+def get_previous_day_columns(df):
+    """Get previous day column names from dataframe"""
+    return {
+        'close': find_column_with_suffix(df, '_close'),
+        'open': find_column_with_suffix(df, '_open'),
+        'volume': find_column_with_suffix(df, '_volume'),
+        'current_price': find_column_with_suffix(df, '_current_price')
+    }
 
 async def fetch_current_price_only(session, symbol, api_key):
     """Fetch only current price for a symbol (optimized for momentum checks)"""
@@ -84,7 +91,6 @@ async def fetch_batch_prices(symbols, api_key, max_concurrent=50):
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Filter out exceptions and return valid results
             valid_results = []
             for result in results:
                 if isinstance(result, dict):
@@ -99,27 +105,14 @@ async def fetch_batch_prices(symbols, api_key, max_concurrent=50):
             return []
 
 def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
-    """
-    Run momentum check at specified time (8:40 or 8:50)
-    
-    Args:
-        date_str: Date string (YYYYMMDD), defaults to today
-        time_str: Time string (HH:MM), defaults to current time  
-        check_time: Which momentum check this is ("8:40" or "8:50")
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
+    """Run momentum check at specified time (8:40 or 8:50)"""
     if not date_str:
         date_str = get_date_str()
     if not time_str:
         time_str = get_time_str()
     
     try:
-        # Ensure filtered data file exists
         local_path = ensure_filtered_data_exists(date_str, S3_BUCKET)
-        
-        # Read the filtered CSV
         df = pd.read_csv(local_path)
         
         if df.empty:
@@ -128,8 +121,8 @@ def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
         
         # Determine previous price column and create new columns
         if check_time == "8:40":
-            prev_price_col = 'price_8_37'
-            current_price_col = 'price_8_40'
+            prev_price_col = 'today_price_8_37'
+            current_price_col = 'today_price_8_40'
             momentum_col = 'momentum_8_40'
             qualified_col = 'qualified_8_40'
             
@@ -140,8 +133,8 @@ def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
             symbols_to_check = df[df['qualified_8_37'] == True]['symbol'].tolist()
             
         elif check_time == "8:50":
-            prev_price_col = 'price_8_40'
-            current_price_col = 'price_8_50'
+            prev_price_col = 'today_price_8_40'
+            current_price_col = 'today_price_8_50'
             momentum_col = 'momentum_8_50'
             qualified_col = 'qualified_8_50'
             
@@ -242,7 +235,6 @@ def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
             if not upload_to_s3(S3_BUCKET, s3_key, local_path):
                 logger.error("Failed to upload momentum data to S3")
                 return False
-            logger.info(f"{check_time} momentum data uploaded to S3: {s3_key}")
         
         # Prepare notification
         if check_time == "8:40":
@@ -251,14 +243,12 @@ def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
             initial_qualified = df['qualified_8_40'].sum()
         
         message = (
-            f"📈 {check_time.upper()} MOMENTUM CHECK COMPLETE\n\n"
+            f"{check_time.upper()} Momentum Check Complete\n\n"
             f"Date: {date_str}\n"
             f"Time: {time_str} CDT\n"
             f"Symbols checked: {len(symbols_to_check):,}\n"
-            f"Price data updated: {updated_prices:,}\n"
             f"MAINTAINED MOMENTUM: {maintained_momentum:,}/{initial_qualified:,}\n\n"
-            f"Momentum Criterion:\n"
-            f"✓ Current price > {prev_price_col.replace('_', ':')} price\n\n"
+            f"Criterion: Current price > {prev_price_col.replace('_', ':')} price\n\n"
         )
         
         if maintained_momentum > 0:
@@ -266,7 +256,7 @@ def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
             momentum_stocks = df[df[qualified_col] == True].copy()
             
             if not momentum_stocks.empty:
-                message += f"🚀 STOCKS WITH MOMENTUM:\n"
+                message += f"STOCKS WITH MOMENTUM:\n"
                 
                 sample_size = min(15, len(momentum_stocks))
                 for i, (_, stock) in enumerate(momentum_stocks.head(sample_size).iterrows(), 1):
@@ -281,24 +271,24 @@ def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
                     
                     message += f"{i:2d}. {symbol}: ${prev_price:.2f} → ${current_price:.2f} (+{momentum_pct:.1f}%)\n"
         else:
-            message += f"⚠️ No stocks maintained momentum at {check_time}"
+            message += f"No stocks maintained momentum at {check_time}"
         
-        message += f"\n📁 File: stock_data/{date_str}/{local_path}"
+        message += f"\nFile: stock_data/{date_str}/{local_path}"
         
         if check_time == "8:50":
-            message += f"\n🎯 These are the FINAL BUY CANDIDATES!"
+            message += f"\nThese are the FINAL BUY CANDIDATES!"
             
             # Send SNS notification for final buy list
             if SEND_BUY_LIST_SNS and maintained_momentum > 0:
                 send_buy_list_sns(df, date_str, time_str)
         else:
-            message += f"\n⏰ Next: 8:50 final momentum check"
+            message += f"\nNext: 8:50 final momentum check"
         
         # Send notification
         if SNS_TOPIC_ARN:
-            subject = f"📈 {check_time} Momentum - {maintained_momentum} stocks maintained"
+            subject = f"{check_time} Momentum - {maintained_momentum} stocks maintained"
             if maintained_momentum == 0:
-                subject = f"⚠️ {check_time} Momentum - No stocks maintained"
+                subject = f"{check_time} Momentum - No stocks maintained"
             
             send_sns_notification(SNS_TOPIC_ARN, subject, message)
         
@@ -312,23 +302,14 @@ def run_momentum_check(date_str=None, time_str=None, check_time="8:40"):
         if SNS_TOPIC_ARN:
             send_sns_notification(
                 SNS_TOPIC_ARN,
-                f"❌ {check_time} Momentum Check Failed",
-                f"Error: {error_msg}\n"
-                f"Date: {date_str}\n"
-                f"Time: {time_str} CDT"
+                f"{check_time} Momentum Check Failed",
+                f"Error: {error_msg}\nDate: {date_str}\nTime: {time_str} CDT"
             )
         
         return False
 
 def send_buy_list_sns(df, date_str, time_str):
-    """
-    Send final buy list via SNS notification
-    
-    Args:
-        df: DataFrame with all stock data
-        date_str: Date string
-        time_str: Time string
-    """
+    """Send final buy list via SNS notification"""
     try:
         # Get final qualified stocks (passed 8:50 momentum)
         final_qualified = df[df.get('qualified_8_50', False) == True].copy()
@@ -356,11 +337,11 @@ def send_buy_list_sns(df, date_str, time_str):
         success = send_sns_notification(SNS_TOPIC_ARN, subject, message_body)
         
         if success:
-            logger.info(f"✅ Buy list SNS notification sent successfully")
-            logger.info(f"📧 Subject: {subject}")
-            logger.info(f"📊 {len(qualified_stocks)} stocks in buy list")
+            logger.info(f"Buy list SNS notification sent successfully")
+            logger.info(f"Subject: {subject}")
+            logger.info(f"{len(qualified_stocks)} stocks in buy list")
         else:
-            logger.error("❌ Failed to send buy list SNS notification")
+            logger.error("Failed to send buy list SNS notification")
         
         return success
         
@@ -377,15 +358,7 @@ def run_8_50_momentum_check(date_str=None, time_str=None):
     return run_momentum_check(date_str, time_str, "8:50")
 
 def get_final_buy_list(date_str=None):
-    """
-    Get final buy list (stocks that passed all checks through 8:50)
-    
-    Args:
-        date_str: Date string (YYYYMMDD), defaults to today
-        
-    Returns:
-        list: List of qualified stock dictionaries, empty list if none or error
-    """
+    """Get final buy list (stocks that passed all checks through 8:50)"""
     if not date_str:
         date_str = get_date_str()
     
@@ -415,19 +388,11 @@ def get_final_buy_list(date_str=None):
         return []
 
 def get_final_buy_symbols(date_str=None):
-    """
-    Get final buy list symbols only
-    
-    Args:
-        date_str: Date string (YYYYMMDD), defaults to today
-        
-    Returns:
-        list: List of symbol strings, empty list if none or error
-    """
+    """Get final buy list symbols only"""
     buy_list = get_final_buy_list(date_str)
     return [stock.get('symbol', 'N/A') for stock in buy_list]
 
-# Legacy compatibility functions for backward compatibility
+# Legacy compatibility functions
 def update_intraday_data_and_qualified(date_str=None, time_str=None, include_high_low=True):
     """Legacy compatibility function - redirects to appropriate momentum check"""
     current_time = time_str or get_time_str()
@@ -453,7 +418,6 @@ if __name__ == "__main__":
     import sys
     import re
     
-    # Setup
     setup_logging()
     validate_config()
     
@@ -483,26 +447,24 @@ if __name__ == "__main__":
         success = run_8_50_momentum_check(date_str, time_str)
     
     if success:
-        print(f"✅ {check_type} momentum check completed successfully")
+        print(f"{check_type} momentum check completed successfully")
         
         # Show current status
         if check_type == "8:40":
-            # Show 8:40 qualified count
             try:
                 local_path = ensure_filtered_data_exists(date_str or get_date_str(), S3_BUCKET)
                 df = pd.read_csv(local_path)
                 qualified_840 = df['qualified_8_40'].sum() if 'qualified_8_40' in df.columns else 0
-                print(f"📊 {qualified_840} stocks maintained momentum at 8:40")
+                print(f"{qualified_840} stocks maintained momentum at 8:40")
             except:
                 pass
         else:  # 8:50
-            # Show final buy list
             buy_symbols = get_final_buy_symbols(date_str)
-            print(f"🎯 {len(buy_symbols)} stocks in FINAL BUY LIST")
+            print(f"{len(buy_symbols)} stocks in FINAL BUY LIST")
             if buy_symbols:
-                print(f"🚀 BUY: {', '.join(buy_symbols[:20])}")
+                print(f"BUY: {', '.join(buy_symbols[:20])}")
                 if len(buy_symbols) > 20:
                     print(f"... and {len(buy_symbols) - 20} more")
     else:
-        print(f"❌ {check_type} momentum check failed")
+        print(f"{check_type} momentum check failed")
         sys.exit(1)
