@@ -3,6 +3,7 @@ python/requirements.txt
 .vscode/
 exported_stock_data/
 python_packages/
+notebooks/
 
 
 # Environment Variables (CRITICAL - Never commit these!)
