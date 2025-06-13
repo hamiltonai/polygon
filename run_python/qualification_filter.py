@@ -5,8 +5,7 @@ import aiohttp
 import logging
 import time
 import re
-from datetime import datetime
-import pytz
+import time
 from config import (
     POLYGON_API_KEY, S3_BUCKET, SNS_TOPIC_ARN, AWS_S3_ENABLED, REQUEST_TIMEOUT,
     MIN_VOLUME_MILLIONS, MIN_PRICE_CHANGE_PCT, MAX_PRICE_CHANGE_PCT
