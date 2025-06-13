@@ -61,14 +61,6 @@ def get_search_configurations():
             'type_filter': 'CS',
             'active': True,
             'priority': 4
-        },
-        {
-            'name': 'All_Active_Securities',
-            'market': None,
-            'exchange': None,
-            'type_filter': None,
-            'active': True,
-            'priority': 5
         }
     ]
 
